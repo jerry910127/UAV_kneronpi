@@ -1,0 +1,18 @@
+[Unit]
+Description=Kneo Pi UAV Auto-Discovery & Zero-SSH Push Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment="PYTHONUNBUFFERED=1"
+WorkingDirectory=/work/kneopi-examples/0717/uav_deploy_pack/20260726_dev/bin
+ExecStart=/usr/bin/python3 /work/kneopi-examples/0717/uav_deploy_pack/20260726_dev/uav_daemon.py
+Restart=always
+RestartSec=3
+KillMode=process
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

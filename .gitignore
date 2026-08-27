@@ -1,0 +1,24 @@
+# CMake build directories
+**/build/
+
+# Object files and libraries
+*.o
+*.a
+*.so
+*.d
+*.out
+
+# Python cache and environments
+**/__pycache__/
+*.py[cod]
+*$py.class
+**/.venv/
+**/venv/
+**/env/
+**/ENV/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

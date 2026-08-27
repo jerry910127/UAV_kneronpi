@@ -1,0 +1,10 @@
+[Unit]
+Description=MorseMicro HaLow Wi-Fi module service
+
+[Service]
+RemainAfterExit=true
+ExecStart=/morse/scripts/morse_init.sh start
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target
