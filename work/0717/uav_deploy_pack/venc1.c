@@ -29,6 +29,10 @@
 #include <sys/time.h>
 #include <arpa/inet.h>
 
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <linux/videodev2.h>
+
 #include <srt/srt.h>
 #include "mem_broker.h"
 #include "mem_util.h"
@@ -58,6 +62,103 @@
 static int g_bTerminate = 0;
 static char* g_szInputPath = "/tmp/uav_test_720p.h264";
 static char* g_szSrtIp = "192.168.168.17";
+
+static void YUV422To420P(const unsigned char* src, unsigned char* dst, int width, int height) {
+    int i, j;
+    unsigned char* y = dst;
+    unsigned char* u = dst + (width * height);
+    unsigned char* v = u + (width * height) / 4;
+    
+    for (i = 0; i < height; i++) {
+        for (j = 0; j < width; j += 2) {
+            int src_idx = (i * width + j) * 2;
+            int y_idx = i * width + j;
+            
+            // YUYV pixel packing: Y0 U0 Y1 V0
+            y[y_idx]     = src[src_idx];     // Y0
+            y[y_idx + 1] = src[src_idx + 2]; // Y1
+            
+            if (i % 2 == 0) {
+                int uv_idx = (i / 2) * (width / 2) + (j / 2);
+                u[uv_idx] = src[src_idx + 1]; // U0
+                v[uv_idx] = src[src_idx + 3]; // V0
+            }
+        }
+    }
+}
+
+static int init_v4l2_device(const char* dev_path, int width, int height, int* out_fd, void** out_mapped_buf, int* out_buf_len) {
+    int fd = open(dev_path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "[venc1] Failed to open V4L2 camera: %s\n", dev_path);
+        return -1;
+    }
+    
+    struct v4l2_format fmt;
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = width;
+    fmt.fmt.pix.height = height;
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+        fprintf(stderr, "[venc1] VIDIOC_S_FMT failed on %s\n", dev_path);
+        close(fd);
+        return -1;
+    }
+    
+    struct v4l2_requestbuffers req;
+    memset(&req, 0, sizeof(req));
+    req.count = 4;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+    
+    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+        fprintf(stderr, "[venc1] VIDIOC_REQBUFS failed on %s\n", dev_path);
+        close(fd);
+        return -1;
+    }
+    
+    struct v4l2_buffer buf;
+    memset(&buf, 0, sizeof(buf));
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = 0;
+    
+    if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+        fprintf(stderr, "[venc1] VIDIOC_QUERYBUF failed\n");
+        close(fd);
+        return -1;
+    }
+    
+    *out_buf_len = buf.length;
+    *out_mapped_buf = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+    if (*out_mapped_buf == MAP_FAILED) {
+        fprintf(stderr, "[venc1] mmap failed\n");
+        close(fd);
+        return -1;
+    }
+    
+    for (int i = 0; i < 4; i++) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        ioctl(fd, VIDIOC_QBUF, &buf);
+    }
+    
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+        fprintf(stderr, "[venc1] VIDIOC_STREAMON failed\n");
+        close(fd);
+        return -1;
+    }
+    
+    *out_fd = fd;
+    fprintf(stderr, "[venc1] V4L2 Camera %s initialized successfully (%dx%d YUYV)\n", dev_path, width, height);
+    return 0;
+}
 static int g_dwSrtPort = 9000;
 static unsigned int g_dwWidth = 1280;
 static unsigned int g_dwHeight = 720;
@@ -84,15 +185,13 @@ static void init_srt(void)
     }
     int yes = 1;
     int latency = 120;
-    int message_api = 0;
-    int transtype = 1; // SRTT_FILE
+    int transtype = 1; // SRTT_FILE (Stream API mode for zero-copy stream parsing)
     int conn_timeout = 1000; // 1000 ms
     int snd_timeout = 300; // 300 ms send timeout (allows I-frames to transmit cleanly without drop)
     int snd_buf = 2000000; // 2MB sender buffer
     srt_setsockopt(g_srt_sock, 0, SRTO_SENDER, &yes, sizeof yes);
     srt_setsockopt(g_srt_sock, 0, SRTO_TSBPDMODE, &yes, sizeof yes);
     srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
-    srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
     srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
     srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
     srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
@@ -104,57 +203,15 @@ static void init_srt(void)
     sa.sin_port = htons(g_dwSrtPort);
     sa.sin_addr.s_addr = inet_addr(g_szSrtIp);
     
-    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode)...\n", g_szSrtIp, g_dwSrtPort);
+    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode, SRTT_LIVE)...\n", g_szSrtIp, g_dwSrtPort);
     gettimeofday(&g_last_reconnect_time, NULL);
     if (srt_connect(g_srt_sock, (struct sockaddr*)&sa, sizeof sa) == SRT_ERROR) {
         fprintf(stderr, "[SRT] Connection failed: %s.\n", srt_getlasterror_str());
         srt_close(g_srt_sock);
         g_srt_sock = SRT_INVALID_SOCK;
     } else {
-        fprintf(stderr, "[SRT] Connected to %s:%d successfully!\n", g_szSrtIp, g_dwSrtPort);
+        fprintf(stderr, "[SRT] Connected to %s:%d successfully (SRTT_LIVE)!\n", g_szSrtIp, g_dwSrtPort);
     }
-}
-
-static void send_srt_headers(VMF_H26XENC_HANDLE_T* h26xe_handle)
-{
-    if (g_srt_sock == SRT_INVALID_SOCK) return;
-    
-    VMF_CODEC_NAL_PARAM_SETS_T tSpsPps;
-    memset(&tSpsPps, 0, sizeof(VMF_CODEC_NAL_PARAM_SETS_T));
-    
-    unsigned char* sps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    unsigned char* pps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    unsigned char* vps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    
-    tSpsPps.pbySps = sps;
-    tSpsPps.pbyPps = pps;
-    tSpsPps.pbyVps = vps;
-    tSpsPps.dwSpsSize = tSpsPps.dwPpsSize = tSpsPps.dwVpsSize = 128;
-    
-    VMF_CODEC_OPTION_T tOpt;
-    memset(&tOpt, 0, sizeof(VMF_CODEC_OPTION_T));
-    tOpt.eOptionFlag = VMF_CODEC_H26XE_GET_HEADER_INFO;
-    tOpt.adwData[0]  = (unsigned long)&tSpsPps;
-    
-    if (0 == VMF_H26xEnc_SetOptions(h26xe_handle, &tOpt)) {
-        fprintf(stderr, "[SRT] Sending VPS (%d bytes), SPS (%d bytes), PPS (%d bytes)...\n", 
-               tSpsPps.dwVpsSize, tSpsPps.dwSpsSize, tSpsPps.dwPpsSize);
-        if (tSpsPps.dwVpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)vps, tSpsPps.dwVpsSize);
-        }
-        if (tSpsPps.dwSpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)sps, tSpsPps.dwSpsSize);
-        }
-        if (tSpsPps.dwPpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)pps, tSpsPps.dwPpsSize);
-        }
-    } else {
-        fprintf(stderr, "[SRT] Failed to get H.265 SPS/PPS/VPS headers!\n");
-    }
-    
-    MemBroker_FreeMemory(sps);
-    MemBroker_FreeMemory(pps);
-    MemBroker_FreeMemory(vps);
 }
 
 static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26xe_handle)
@@ -173,7 +230,6 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
         if (g_srt_sock != SRT_INVALID_SOCK) {
             int yes = 1;
             int latency = 120;
-            int message_api = 0;
             int transtype = 1; // SRTT_FILE
             int conn_timeout = 1000; // 1000 ms
             int snd_timeout = 300; // 300 ms send timeout
@@ -181,7 +237,6 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             srt_setsockopt(g_srt_sock, 0, SRTO_SENDER, &yes, sizeof yes);
             srt_setsockopt(g_srt_sock, 0, SRTO_TSBPDMODE, &yes, sizeof yes);
             srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
-            srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
             srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
             srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
             srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
@@ -193,30 +248,39 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             sa.sin_port = htons(g_dwSrtPort);
             sa.sin_addr.s_addr = inet_addr(g_szSrtIp);
             
-            fprintf(stderr, "[SRT] Reconnecting to %s:%d...\n", g_szSrtIp, g_dwSrtPort);
+            fprintf(stderr, "[SRT] Reconnecting to %s:%d (SRTT_LIVE)...\n", g_szSrtIp, g_dwSrtPort);
             if (srt_connect(g_srt_sock, (struct sockaddr*)&sa, sizeof sa) == SRT_ERROR) {
                 fprintf(stderr, "[SRT] Reconnect failed: %s. Will retry.\n", srt_getlasterror_str());
                 srt_close(g_srt_sock);
                 g_srt_sock = SRT_INVALID_SOCK;
                 return;
             }
-            fprintf(stderr, "[SRT] Reconnected to %s:%d successfully!\n", g_szSrtIp, g_dwSrtPort);
-            send_srt_headers(h26xe_handle);
+            fprintf(stderr, "[SRT] Reconnected to %s:%d successfully (SRTT_LIVE)!\n", g_szSrtIp, g_dwSrtPort);
         } else {
             return;
         }
     }
     
-    int ret = srt_send(g_srt_sock, (const char*)data, size);
-    if (ret == SRT_ERROR) {
-        int err = srt_getlasterror(NULL);
-        if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
-            fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
-            if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
-                srt_close(g_srt_sock);
-                g_srt_sock = SRT_INVALID_SOCK;
+    const char* ptr = (const char*)data;
+    int remaining = size;
+    const int chunk_size = 1316; // Standard SRT Live MTU packet payload
+
+    while (remaining > 0) {
+        int to_send = (remaining > chunk_size) ? chunk_size : remaining;
+        int ret = srt_send(g_srt_sock, ptr, to_send);
+        if (ret == SRT_ERROR) {
+            int err = srt_getlasterror(NULL);
+            if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
+                fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
+                if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
+                    srt_close(g_srt_sock);
+                    g_srt_sock = SRT_INVALID_SOCK;
+                    break;
+                }
             }
         }
+        ptr += to_send;
+        remaining -= to_send;
     }
 }
 
@@ -351,40 +415,68 @@ int main(int argc, char* argv[])
         }
     }
 
+    int bCameraMode = (strncmp(g_szInputPath, "/dev/video", 10) == 0);
+
+    if (bCameraMode) {
+        if (g_dwWidth == 1280 && g_dwHeight == 720) {
+            // Intel RealSense YUYV default resolution is 640x480
+            g_dwWidth = 640;
+            g_dwHeight = 480;
+        }
+    }
+
+    fprintf(stderr, "[%s] Mode: %s\n", MODULE_NAME, bCameraMode ? "V4L2 Real Camera" : "H.264 Video File");
     fprintf(stderr, "[%s] Input Path: %s\n", MODULE_NAME, g_szInputPath);
     fprintf(stderr, "[%s] Target SRT: %s:%d\n", MODULE_NAME, g_szSrtIp, g_dwSrtPort);
     fprintf(stderr, "[%s] Resolution: %dx%d @ %dfps\n", MODULE_NAME, g_dwWidth, g_dwHeight, g_dwFps);
     fprintf(stderr, "[%s] Bitrate: %d bps, GOP: %d\n", MODULE_NAME, g_dwBitrate, g_dwGop);
 
-    /* Open input bitstream file */
-    pfInput = fopen(g_szInputPath, "rb");
-    if (!pfInput) {
-        fprintf(stderr, "[%s] Failed to open input file: %s\n", MODULE_NAME, g_szInputPath);
-        return -1;
+    int v4l2_fd = -1;
+    void* v4l2_mapped_buf = NULL;
+    int v4l2_buf_len = 0;
+    unsigned char* pbyCameraYuv420Buf = NULL;
+
+    if (bCameraMode) {
+        if (init_v4l2_device(g_szInputPath, g_dwWidth, g_dwHeight, &v4l2_fd, &v4l2_mapped_buf, &v4l2_buf_len) != 0) {
+            fprintf(stderr, "[%s] V4L2 Camera init failed: %s\n", MODULE_NAME, g_szInputPath);
+            return -1;
+        }
+        pbyCameraYuv420Buf = (unsigned char*)MemBroker_GetMemory(g_dwWidth * g_dwHeight * 3 / 2, VMF_ALIGN_TYPE_DEFAULT);
+        if (!pbyCameraYuv420Buf) {
+            fprintf(stderr, "[%s] Failed to allocate camera YUV buffer\n", MODULE_NAME);
+            return -1;
+        }
+    } else {
+        /* Open input bitstream file */
+        pfInput = fopen(g_szInputPath, "rb");
+        if (!pfInput) {
+            fprintf(stderr, "[%s] Failed to open input file: %s\n", MODULE_NAME, g_szInputPath);
+            return -1;
+        }
+
+        /* Initialize VPU Hardware H.264 Decoder */
+        VMF_VDEC_INITOPT_T vdec_opt;
+        memset(&vdec_opt, 0, sizeof(VMF_VDEC_INITOPT_T));
+        vdec_opt.eCodecType = VMF_VDEC_CODEC_TYPE_H264;
+        vdec_opt.dwStreamSize = STREAM_FEEDING_SIZE;
+        
+        ptH26xDecoder = VMF_VDEC_Init(&vdec_opt);
+        if (!ptH26xDecoder) {
+            fprintf(stderr, "[%s] Failed to initialize hardware decoder\n", MODULE_NAME);
+            goto RELEASE;
+        }
+
+        ptH26xState = (VMF_H26XDEC_STATE_T*)VMF_VDEC_GetState(ptH26xDecoder);
+        pbyInBuf = (unsigned char*)malloc(STREAM_FEEDING_SIZE);
+        if (!pbyInBuf) {
+            fprintf(stderr, "[%s] Failed to allocate input stream buffer\n", MODULE_NAME);
+            goto RELEASE;
+        }
+        ptH26xState->tStreamBuf.ulVirtAddr = (unsigned long)pbyInBuf;
     }
 
     /* Initialize SRT network streaming */
     init_srt();
-
-    /* Initialize VPU Hardware H.264 Decoder */
-    VMF_VDEC_INITOPT_T vdec_opt;
-    memset(&vdec_opt, 0, sizeof(VMF_VDEC_INITOPT_T));
-    vdec_opt.eCodecType = VMF_VDEC_CODEC_TYPE_H264;
-    vdec_opt.dwStreamSize = STREAM_FEEDING_SIZE;
-    
-    ptH26xDecoder = VMF_VDEC_Init(&vdec_opt);
-    if (!ptH26xDecoder) {
-        fprintf(stderr, "[%s] Failed to initialize hardware decoder\n", MODULE_NAME);
-        goto RELEASE;
-    }
-
-    ptH26xState = (VMF_H26XDEC_STATE_T*)VMF_VDEC_GetState(ptH26xDecoder);
-    pbyInBuf = (unsigned char*)malloc(STREAM_FEEDING_SIZE);
-    if (!pbyInBuf) {
-        fprintf(stderr, "[%s] Failed to allocate input stream buffer\n", MODULE_NAME);
-        goto RELEASE;
-    }
-    ptH26xState->tStreamBuf.ulVirtAddr = (unsigned long)pbyInBuf;
 
     /* Initialize VPU Hardware H.265 Encoder */
     VMF_CODEC_INITOPT_T codec_initopt;
@@ -392,11 +484,10 @@ int main(int argc, char* argv[])
     codec_initopt.eCodec = VMF_CODEC_ENC_HEVC; // H.265
     codec_initopt.dwEncWidth = g_dwWidth;
     codec_initopt.dwEncHeight = g_dwHeight;
-    codec_initopt.dwImgWidth = g_dwWidth;
-    codec_initopt.dwImgHeight = g_dwHeight;
-    codec_initopt.dwMaxWidth = g_dwWidth;
-    codec_initopt.dwMaxHeight = g_dwHeight;
-    codec_initopt.dwMaxUvWidth = g_dwWidth;
+    codec_initopt.dwSrcWidth = g_dwWidth;
+    codec_initopt.dwSrcHeight = g_dwHeight;
+    codec_initopt.dwSrcStride = ((g_dwWidth + 31) & (~31));
+    codec_initopt.dwSrcChromaStride = ((g_dwWidth + 31) & (~31));
     codec_initopt.dwCropX = codec_initopt.dwCropY = 0;
     
     VMF_H26XENC_CONFIG_T h26xe_config;
@@ -428,9 +519,8 @@ int main(int argc, char* argv[])
     h26xe_state->ptInputInfo = &input_info;
     h26xe_state->ptOutputInfo = &output_info;
     input_info.dwStride = ((g_dwWidth + 31) & (~31));
-
-    /* Send SRT initial stream headers (VPS, SPS, PPS) */
-    send_srt_headers(h26xe_handle);
+    /* Initial keyframe generated by VMF_H26xEnc contains self-contained Annex-B VPS/SPS/PPS */
+    // send_srt_headers(h26xe_handle);
 
     /* Allocate physical/virtual encoder output buffer */
     ptEncBuff = MemBroker_GetMemory(ptEncBuff_SIZE, VMF_ALIGN_TYPE_DEFAULT);
@@ -443,80 +533,50 @@ int main(int argc, char* argv[])
 
     unsigned int bFirstRead = 1;
     unsigned int frame_cnt = 0;
-    unsigned int dec_frame_idx = 0;
 
     while (!g_bTerminate) {
         struct timeval start_time, end_time;
         gettimeofday(&start_time, NULL);
 
-        ptH26xState->tStreamBuf.dwSize = 0;            
-        if (bFirstRead || VMF_DEC_EMPTY == ptH26xState->eResult) {
-            bFirstRead = 0;
-            unsigned int dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
-            if (dwReadCount == 0) { 
-                // Loop the video stream
-                fprintf(stderr, "[VDEC] Looping input video file...\n");
-                fseek(pfInput, 0, SEEK_SET);
-                dec_frame_idx = 0;
-                dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
-                if (dwReadCount == 0) {
-                    ptH26xState->bEndOfBitstream = 1;
-                }
-            }   
-            ptH26xState->tStreamBuf.dwSize = dwReadCount;
-        }
+        if (bCameraMode) {
+            struct v4l2_buffer buf;
+            memset(&buf, 0, sizeof(buf));
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
 
-        int dwRet = VMF_VDEC_ProcessOneFrame(ptH26xDecoder);
-        if (dwRet == 0) {
-            if (ptH26xState->eResult == VMF_DEC_OK) {
-                dec_frame_idx++;
+            if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf) >= 0) {
+                YUV422To420P((const unsigned char*)v4l2_mapped_buf, pbyCameraYuv420Buf, g_dwWidth, g_dwHeight);
+                ioctl(v4l2_fd, VIDIOC_QBUF, &buf);
 
-                /* Frame Dropping / Downsampling:
-                 * Assuming 30fps source file. If target g_dwFps < 30 (e.g. 10fps),
-                 * only encode & send 1 out of every (30 / g_dwFps) decoded frames.
-                 * This maintains 1:1 real-time duration (10s video finishes in 10s).
-                 */
-                unsigned int stride = (g_dwFps > 0 && g_dwFps < 30) ? (30 / g_dwFps) : 1;
-                if ((dec_frame_idx - 1) % stride != 0) {
-                    continue;
-                }
-                /* Hardware zero-copy YUV sharing from VDEC output to VENC input */
-                input_info.tFrameBufPhys.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysYAddr;
-                input_info.tFrameBufPhys.apdwData[1] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysCbAddr;
-                input_info.tFrameBufPhys.apdwData[2] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysCrAddr;
-                input_info.tFrameBufPhys.apdwData[3] = NULL;
-                
-                input_info.tFrameBuf.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtYAddr;
-                input_info.tFrameBuf.apdwData[1] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtCbAddr;
-                input_info.tFrameBuf.apdwData[2] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtCrAddr;
+                input_info.tFrameBuf.apdwData[0] = pbyCameraYuv420Buf;
+                input_info.tFrameBuf.apdwData[1] = pbyCameraYuv420Buf + (g_dwWidth * g_dwHeight);
+                input_info.tFrameBuf.apdwData[2] = input_info.tFrameBuf.apdwData[1] + (g_dwWidth * g_dwHeight / 4);
                 input_info.tFrameBuf.apdwData[3] = NULL;
-                
-                /* Prepare encoder output destination buffer */
+
+                input_info.tFrameBufPhys.apdwData[0] = (unsigned char*)MemBroker_GetPhysAddr(input_info.tFrameBuf.apdwData[0]);
+                input_info.tFrameBufPhys.apdwData[1] = (unsigned char*)MemBroker_GetPhysAddr(input_info.tFrameBuf.apdwData[1]);
+                input_info.tFrameBufPhys.apdwData[2] = (unsigned char*)MemBroker_GetPhysAddr(input_info.tFrameBuf.apdwData[2]);
+                input_info.tFrameBufPhys.apdwData[3] = NULL;
+
                 output_info.pbyDstVirtBuf = (unsigned char*) ptEncBuff;
                 output_info.pbyDstPhysBuf = (unsigned char*) MemBroker_GetPhysAddr(ptEncBuff);
                 output_info.dwBufSize = ptEncBuff_SIZE;
-                
-                /* Process H.265 encoding */
+
                 unsigned int enc_ret = VMF_H26xEnc_ProcessOneFrame(h26xe_handle);
                 if (enc_ret == 0) {
                     unsigned int encoded_bytes = h26xe_state->dwEncBytes;
                     unsigned int is_key = h26xe_state->bIDR;
                     
-                    /* Send encoded stream via SRT to ground station */
                     if (encoded_bytes > 0) {
                         send_srt_data(ptEncBuff, encoded_bytes, h26xe_handle);
                         frame_cnt++;
-
-                        /* Execute Adaptive Bitrate (ABR) control loop */
                         process_abr_control(h26xe_handle, frame_cnt);
 
                         if (frame_cnt % 30 == 0) {
-                            printf("[UAV Strm] Streamed %u frames (last %d bytes, key: %d) successfully\n", 
+                            printf("[Cam Strm] Streamed %u camera frames (last %d bytes, key: %d) successfully\n", 
                                    frame_cnt, encoded_bytes, is_key);
                         }
                     }
-                } else {
-                    fprintf(stderr, "[Encoder] VMF_H26xEnc_ProcessOneFrame failed: %d\n", enc_ret);
                 }
 
                 gettimeofday(&end_time, NULL);
@@ -527,12 +587,79 @@ int main(int argc, char* argv[])
                 }
             }
         } else {
-            if (ptH26xState->bEndOfBitstream) {
-                fprintf(stderr, "[VDEC] End of bitstream reached.\n");
-                break;
+            ptH26xState->tStreamBuf.dwSize = 0;            
+            if (bFirstRead || VMF_DEC_EMPTY == ptH26xState->eResult) {
+                bFirstRead = 0;
+                unsigned int dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
+                if (dwReadCount == 0) { 
+                    // Loop the video stream
+                    fprintf(stderr, "[VDEC] Looping input video file...\n");
+                    fseek(pfInput, 0, SEEK_SET);
+                    dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
+                    if (dwReadCount == 0) {
+                        ptH26xState->bEndOfBitstream = 1;
+                    }
+                }   
+                ptH26xState->tStreamBuf.dwSize = dwReadCount;
+            }
+
+            int dwRet = VMF_VDEC_ProcessOneFrame(ptH26xDecoder);
+            if (dwRet == 0) {
+                if (ptH26xState->eResult == VMF_DEC_OK) {
+                    /* Hardware zero-copy YUV sharing from VDEC output to VENC input */
+                    input_info.tFrameBufPhys.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysYAddr;
+                    input_info.tFrameBufPhys.apdwData[1] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysCbAddr;
+                    input_info.tFrameBufPhys.apdwData[2] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysCrAddr;
+                    input_info.tFrameBufPhys.apdwData[3] = NULL;
+                    
+                    input_info.tFrameBuf.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtYAddr;
+                    input_info.tFrameBuf.apdwData[1] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtCbAddr;
+                    input_info.tFrameBuf.apdwData[2] = (unsigned char*) ptH26xState->tFrameBuf.ulVirtCrAddr;
+                    input_info.tFrameBuf.apdwData[3] = NULL;
+                    
+                    /* Prepare encoder output destination buffer */
+                    output_info.pbyDstVirtBuf = (unsigned char*) ptEncBuff;
+                    output_info.pbyDstPhysBuf = (unsigned char*) MemBroker_GetPhysAddr(ptEncBuff);
+                    output_info.dwBufSize = ptEncBuff_SIZE;
+                    
+                    /* Process H.265 encoding */
+                    unsigned int enc_ret = VMF_H26xEnc_ProcessOneFrame(h26xe_handle);
+                    if (enc_ret == 0) {
+                        unsigned int encoded_bytes = h26xe_state->dwEncBytes;
+                        unsigned int is_key = h26xe_state->bIDR;
+                        
+                        /* Send encoded stream via SRT to ground station */
+                        if (encoded_bytes > 0) {
+                            send_srt_data(ptEncBuff, encoded_bytes, h26xe_handle);
+                            frame_cnt++;
+
+                            /* Execute Adaptive Bitrate (ABR) control loop */
+                            process_abr_control(h26xe_handle, frame_cnt);
+
+                            if (frame_cnt % 30 == 0) {
+                                printf("[UAV Strm] Streamed %u frames (last %d bytes, key: %d) successfully\n", 
+                                       frame_cnt, encoded_bytes, is_key);
+                            }
+                        }
+                    } else {
+                        fprintf(stderr, "[Encoder] VMF_H26xEnc_ProcessOneFrame failed: %d\n", enc_ret);
+                    }
+
+                    gettimeofday(&end_time, NULL);
+                    long long elapsed_usec = (end_time.tv_sec - start_time.tv_sec) * 1000000LL + (end_time.tv_usec - start_time.tv_usec);
+                    long long frame_period_usec = 1000000LL / g_dwFps;
+                    if (elapsed_usec < frame_period_usec) {
+                        usleep(frame_period_usec - elapsed_usec);
+                    }
+                }
             } else {
-                fprintf(stderr, "[VDEC] VMF_VDEC_ProcessOneFrame failed, error: %d\n", ptH26xState->eResult);
-                break;
+                if (ptH26xState->bEndOfBitstream) {
+                    fprintf(stderr, "[VDEC] End of bitstream reached.\n");
+                    break;
+                } else {
+                    fprintf(stderr, "[VDEC] VMF_VDEC_ProcessOneFrame failed, error: %d\n", ptH26xState->eResult);
+                    break;
+                }
             }
         }
     }

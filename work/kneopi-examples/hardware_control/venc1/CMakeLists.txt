@@ -16,10 +16,12 @@ INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/include
 LINK_DIRECTORIES(${VTCS_LIB_PATH})
 
 SET(LINK_LIST vmf
+              vdec
               util
               iniparser
 	          msgbroker
-              pthread)
+              pthread
+              srt)
 
 # executable
 FILE(GLOB_RECURSE SRC_LIST "./venc1.c"

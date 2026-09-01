@@ -185,15 +185,13 @@ static void init_srt(void)
     }
     int yes = 1;
     int latency = 120;
-    int message_api = 0;
-    int transtype = 1; // SRTT_FILE
+    int transtype = 1; // SRTT_FILE (Stream API mode for zero-copy stream parsing)
     int conn_timeout = 1000; // 1000 ms
     int snd_timeout = 300; // 300 ms send timeout (allows I-frames to transmit cleanly without drop)
     int snd_buf = 2000000; // 2MB sender buffer
     srt_setsockopt(g_srt_sock, 0, SRTO_SENDER, &yes, sizeof yes);
     srt_setsockopt(g_srt_sock, 0, SRTO_TSBPDMODE, &yes, sizeof yes);
     srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
-    srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
     srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
     srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
     srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
@@ -205,57 +203,15 @@ static void init_srt(void)
     sa.sin_port = htons(g_dwSrtPort);
     sa.sin_addr.s_addr = inet_addr(g_szSrtIp);
     
-    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode)...\n", g_szSrtIp, g_dwSrtPort);
+    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode, SRTT_LIVE)...\n", g_szSrtIp, g_dwSrtPort);
     gettimeofday(&g_last_reconnect_time, NULL);
     if (srt_connect(g_srt_sock, (struct sockaddr*)&sa, sizeof sa) == SRT_ERROR) {
         fprintf(stderr, "[SRT] Connection failed: %s.\n", srt_getlasterror_str());
         srt_close(g_srt_sock);
         g_srt_sock = SRT_INVALID_SOCK;
     } else {
-        fprintf(stderr, "[SRT] Connected to %s:%d successfully!\n", g_szSrtIp, g_dwSrtPort);
+        fprintf(stderr, "[SRT] Connected to %s:%d successfully (SRTT_LIVE)!\n", g_szSrtIp, g_dwSrtPort);
     }
-}
-
-static void send_srt_headers(VMF_H26XENC_HANDLE_T* h26xe_handle)
-{
-    if (g_srt_sock == SRT_INVALID_SOCK) return;
-    
-    VMF_CODEC_NAL_PARAM_SETS_T tSpsPps;
-    memset(&tSpsPps, 0, sizeof(VMF_CODEC_NAL_PARAM_SETS_T));
-    
-    unsigned char* sps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    unsigned char* pps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    unsigned char* vps = (unsigned char *)MemBroker_GetMemory(128, VMF_ALIGN_TYPE_DEFAULT);
-    
-    tSpsPps.pbySps = sps;
-    tSpsPps.pbyPps = pps;
-    tSpsPps.pbyVps = vps;
-    tSpsPps.dwSpsSize = tSpsPps.dwPpsSize = tSpsPps.dwVpsSize = 128;
-    
-    VMF_CODEC_OPTION_T tOpt;
-    memset(&tOpt, 0, sizeof(VMF_CODEC_OPTION_T));
-    tOpt.eOptionFlag = VMF_CODEC_H26XE_GET_HEADER_INFO;
-    tOpt.adwData[0]  = (unsigned long)&tSpsPps;
-    
-    if (0 == VMF_H26xEnc_SetOptions(h26xe_handle, &tOpt)) {
-        fprintf(stderr, "[SRT] Sending VPS (%d bytes), SPS (%d bytes), PPS (%d bytes)...\n", 
-               tSpsPps.dwVpsSize, tSpsPps.dwSpsSize, tSpsPps.dwPpsSize);
-        if (tSpsPps.dwVpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)vps, tSpsPps.dwVpsSize);
-        }
-        if (tSpsPps.dwSpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)sps, tSpsPps.dwSpsSize);
-        }
-        if (tSpsPps.dwPpsSize > 0) {
-            srt_send(g_srt_sock, (const char*)pps, tSpsPps.dwPpsSize);
-        }
-    } else {
-        fprintf(stderr, "[SRT] Failed to get H.265 SPS/PPS/VPS headers!\n");
-    }
-    
-    MemBroker_FreeMemory(sps);
-    MemBroker_FreeMemory(pps);
-    MemBroker_FreeMemory(vps);
 }
 
 static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26xe_handle)
@@ -274,7 +230,6 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
         if (g_srt_sock != SRT_INVALID_SOCK) {
             int yes = 1;
             int latency = 120;
-            int message_api = 0;
             int transtype = 1; // SRTT_FILE
             int conn_timeout = 1000; // 1000 ms
             int snd_timeout = 300; // 300 ms send timeout
@@ -282,7 +237,6 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             srt_setsockopt(g_srt_sock, 0, SRTO_SENDER, &yes, sizeof yes);
             srt_setsockopt(g_srt_sock, 0, SRTO_TSBPDMODE, &yes, sizeof yes);
             srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
-            srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
             srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
             srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
             srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
@@ -294,30 +248,39 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             sa.sin_port = htons(g_dwSrtPort);
             sa.sin_addr.s_addr = inet_addr(g_szSrtIp);
             
-            fprintf(stderr, "[SRT] Reconnecting to %s:%d...\n", g_szSrtIp, g_dwSrtPort);
+            fprintf(stderr, "[SRT] Reconnecting to %s:%d (SRTT_LIVE)...\n", g_szSrtIp, g_dwSrtPort);
             if (srt_connect(g_srt_sock, (struct sockaddr*)&sa, sizeof sa) == SRT_ERROR) {
                 fprintf(stderr, "[SRT] Reconnect failed: %s. Will retry.\n", srt_getlasterror_str());
                 srt_close(g_srt_sock);
                 g_srt_sock = SRT_INVALID_SOCK;
                 return;
             }
-            fprintf(stderr, "[SRT] Reconnected to %s:%d successfully!\n", g_szSrtIp, g_dwSrtPort);
-            send_srt_headers(h26xe_handle);
+            fprintf(stderr, "[SRT] Reconnected to %s:%d successfully (SRTT_LIVE)!\n", g_szSrtIp, g_dwSrtPort);
         } else {
             return;
         }
     }
     
-    int ret = srt_send(g_srt_sock, (const char*)data, size);
-    if (ret == SRT_ERROR) {
-        int err = srt_getlasterror(NULL);
-        if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
-            fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
-            if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
-                srt_close(g_srt_sock);
-                g_srt_sock = SRT_INVALID_SOCK;
+    const char* ptr = (const char*)data;
+    int remaining = size;
+    const int chunk_size = 1316; // Standard SRT Live MTU packet payload
+
+    while (remaining > 0) {
+        int to_send = (remaining > chunk_size) ? chunk_size : remaining;
+        int ret = srt_send(g_srt_sock, ptr, to_send);
+        if (ret == SRT_ERROR) {
+            int err = srt_getlasterror(NULL);
+            if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
+                fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
+                if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
+                    srt_close(g_srt_sock);
+                    g_srt_sock = SRT_INVALID_SOCK;
+                    break;
+                }
             }
         }
+        ptr += to_send;
+        remaining -= to_send;
     }
 }
 
@@ -521,11 +484,10 @@ int main(int argc, char* argv[])
     codec_initopt.eCodec = VMF_CODEC_ENC_HEVC; // H.265
     codec_initopt.dwEncWidth = g_dwWidth;
     codec_initopt.dwEncHeight = g_dwHeight;
-    codec_initopt.dwImgWidth = g_dwWidth;
-    codec_initopt.dwImgHeight = g_dwHeight;
-    codec_initopt.dwMaxWidth = g_dwWidth;
-    codec_initopt.dwMaxHeight = g_dwHeight;
-    codec_initopt.dwMaxUvWidth = g_dwWidth;
+    codec_initopt.dwSrcWidth = g_dwWidth;
+    codec_initopt.dwSrcHeight = g_dwHeight;
+    codec_initopt.dwSrcStride = ((g_dwWidth + 31) & (~31));
+    codec_initopt.dwSrcChromaStride = ((g_dwWidth + 31) & (~31));
     codec_initopt.dwCropX = codec_initopt.dwCropY = 0;
     
     VMF_H26XENC_CONFIG_T h26xe_config;
@@ -557,9 +519,8 @@ int main(int argc, char* argv[])
     h26xe_state->ptInputInfo = &input_info;
     h26xe_state->ptOutputInfo = &output_info;
     input_info.dwStride = ((g_dwWidth + 31) & (~31));
-
-    /* Send SRT initial stream headers (VPS, SPS, PPS) */
-    send_srt_headers(h26xe_handle);
+    /* Initial keyframe generated by VMF_H26xEnc contains self-contained Annex-B VPS/SPS/PPS */
+    // send_srt_headers(h26xe_handle);
 
     /* Allocate physical/virtual encoder output buffer */
     ptEncBuff = MemBroker_GetMemory(ptEncBuff_SIZE, VMF_ALIGN_TYPE_DEFAULT);

@@ -26,7 +26,14 @@ import subprocess
 UDP_PORT = 9002
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEV_BIN_DIR = os.path.join(SCRIPT_DIR, "bin")
-BIN_DIR = DEV_BIN_DIR if os.path.exists(os.path.join(DEV_BIN_DIR, "venc1")) else "/work/kneopi-examples/bin"
+if os.path.exists(os.path.join(SCRIPT_DIR, "venc1")):
+    BIN_DIR = SCRIPT_DIR
+elif os.path.exists(os.path.join(DEV_BIN_DIR, "venc1")):
+    BIN_DIR = DEV_BIN_DIR
+elif os.path.exists("/work/bin/venc1"):
+    BIN_DIR = "/work/bin"
+else:
+    BIN_DIR = "/work/kneopi-examples/bin"
 TIMEOUT_SEC = 300.0
 IP_FILE = "/tmp/ground_station_ip.txt"
 PERSISTENT_H264 = os.path.join(SCRIPT_DIR, "test_video", "uav_test_720p.h264")
@@ -90,7 +97,9 @@ class UAVDaemon:
                     "ffmpeg", "-y", "-i", mp4_path,
                     "-t", "60", "-vf", "scale=1280:720",
                     "-c:v", "libx264", "-preset", "ultrafast",
-                    "-bf", "0", "-g", "10", "-pix_fmt", "yuv420p",
+                    "-bf", "0", "-g", "10",
+                    "-x264-params", "repeat-headers=1:intra-refresh=0:annexb=1:sliced-threads=0",
+                    "-pix_fmt", "yuv420p",
                     H264_TEST_FILE
                 ]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
