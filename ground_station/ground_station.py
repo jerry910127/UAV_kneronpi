@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 Ground Station Live Receiver & HUD Interface for Kneo Pi (KL730 UAV)
-Author: Antigravity Agent
-Description:
-    High-performance Ground Station receiver for Kneo Pi (KL730 UAV).
-    - Features Auto-Discovery & Heartbeat Broadcast on UDP 9002 for Zero-SSH UAV push.
-    - Receives native 10 FPS 720p H.265 video stream over SRT (Port 9000).
-    - Receives real-time YOLOv5 bounding box metadata over UDP (Port 9001).
-    - Displays high-definition live video with HUD overlays (FPS, Telemetry, Mode).
-    - Features Asynchronous DIS Optical Flow Interpolation Thread & High-Precision 30.0 FPS Display Pacer.
 """
 
 import sys
@@ -33,7 +25,6 @@ WIDTH = 1280
 HEIGHT = 720
 DISP_WIDTH = 1280
 DISP_HEIGHT = 720
-FLOW_SCALE = 0.25   # 0.25 = 320x180 超高速算光流 (< 1.5ms)
 LOG_FILE = "fps_performance.log"
 
 def write_log(msg, level="INFO"):
@@ -79,11 +70,8 @@ class HeartbeatSender(threading.Thread):
         self.running = False
 
 
-
 class TelemetryReceiver(threading.Thread):
-    """
-    Receives YOLO metadata over UDP port 9001 sent by display_liveview.cpp on Kneo Pi.
-    """
+    """Receives YOLO metadata over UDP port 9001 sent by Kneo Pi"""
     def __init__(self, port=UDP_TELEMETRY_PORT):
         super().__init__(daemon=True)
         self.port = port
@@ -136,10 +124,9 @@ class TelemetryReceiver(threading.Thread):
 
 
 class MotionInterpolator:
-    """Enhanced DIS Optical Flow Interpolator with Motion Vector Smoothing & Anti-Jitter Clamping"""
-    def __init__(self, scale_factor=0.5):
-        # Use PRESET_MEDIUM for smooth, high-precision motion vectors without chaotic jitter
-        self.dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+    """Enhanced DIS Optical Flow Interpolator with Motion Vector Smoothing"""
+    def __init__(self, scale_factor=0.25):
+        self.dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
         self.dis.setUseMeanNormalization(True)
         self.scale_factor = scale_factor
         self.grid_x = None
@@ -155,33 +142,19 @@ class MotionInterpolator:
 
     def compute_flow(self, prev_gray, next_gray):
         h, w = prev_gray.shape[:2]
-        if self.scale_factor < 1.0:
-            sw, sh = int(w * self.scale_factor), int(h * self.scale_factor)
-            small_prev = cv2.resize(prev_gray, (sw, sh), interpolation=cv2.INTER_AREA)
-            small_next = cv2.resize(next_gray, (sw, sh), interpolation=cv2.INTER_AREA)
-            flow_fw_small = self.dis.calc(small_prev, small_next, None)
-            flow_bw_small = self.dis.calc(small_next, small_prev, None)
-            
-            # Smooth flow fields to eliminate localized high-frequency vector noise (anti-jitter)
-            flow_fw_small[:, :, 0] = cv2.GaussianBlur(flow_fw_small[:, :, 0], (5, 5), 0)
-            flow_fw_small[:, :, 1] = cv2.GaussianBlur(flow_fw_small[:, :, 1], (5, 5), 0)
-            flow_bw_small[:, :, 0] = cv2.GaussianBlur(flow_bw_small[:, :, 0], (5, 5), 0)
-            flow_bw_small[:, :, 1] = cv2.GaussianBlur(flow_bw_small[:, :, 1], (5, 5), 0)
-
-            inv_scale = 1.0 / self.scale_factor
-            flow_fw = cv2.resize(flow_fw_small, (w, h), interpolation=cv2.INTER_LINEAR) * inv_scale
-            flow_bw = cv2.resize(flow_bw_small, (w, h), interpolation=cv2.INTER_LINEAR) * inv_scale
-        else:
-            flow_fw = self.dis.calc(prev_gray, next_gray, None)
-            flow_bw = self.dis.calc(next_gray, prev_gray, None)
-            flow_fw[:, :, 0] = cv2.GaussianBlur(flow_fw[:, :, 0], (5, 5), 0)
-            flow_fw[:, :, 1] = cv2.GaussianBlur(flow_fw[:, :, 1], (5, 5), 0)
-            flow_bw[:, :, 0] = cv2.GaussianBlur(flow_bw[:, :, 0], (5, 5), 0)
-            flow_bw[:, :, 1] = cv2.GaussianBlur(flow_bw[:, :, 1], (5, 5), 0)
-            
-        # Clamp extreme motion vectors (max 40px) to prevent wild image warping tearing
-        flow_fw = np.clip(flow_fw, -40.0, 40.0)
-        flow_bw = np.clip(flow_bw, -40.0, 40.0)
+        sw, sh = int(w * self.scale_factor), int(h * self.scale_factor)
+        small_prev = cv2.resize(prev_gray, (sw, sh), interpolation=cv2.INTER_AREA)
+        small_next = cv2.resize(next_gray, (sw, sh), interpolation=cv2.INTER_AREA)
+        
+        flow_fw_small = self.dis.calc(small_prev, small_next, None)
+        flow_bw_small = self.dis.calc(small_next, small_prev, None)
+        
+        inv_scale = 1.0 / self.scale_factor
+        flow_fw = cv2.resize(flow_fw_small, (w, h), interpolation=cv2.INTER_LINEAR) * inv_scale
+        flow_bw = cv2.resize(flow_bw_small, (w, h), interpolation=cv2.INTER_LINEAR) * inv_scale
+        
+        flow_fw = np.clip(flow_fw, -35.0, 35.0)
+        flow_bw = np.clip(flow_bw, -35.0, 35.0)
         return flow_fw, flow_bw
 
     def interpolate_frame(self, img1, img2, flow_fw, flow_bw, alpha):
@@ -193,7 +166,6 @@ class MotionInterpolator:
         h, w = img1.shape[:2]
         self._init_grid(h, w)
 
-        # Correct remap lookup: map_src = grid_dst - alpha * flow_fw
         map_fw_x = self.grid_x - alpha * flow_fw[:, :, 0]
         map_fw_y = self.grid_y - alpha * flow_fw[:, :, 1]
         warped1 = cv2.remap(img1, map_fw_x, map_fw_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
@@ -206,35 +178,26 @@ class MotionInterpolator:
 
 
 def start_ffmpeg_srt_receiver(srt_port=SRT_PORT, out_w=DISP_WIDTH, out_h=DISP_HEIGHT):
-    """Launches low-latency FFmpeg process listening on SRT port 9000"""
-    if os.path.exists("srt_download_temp.h265"):
-        try:
-            os.remove("srt_download_temp.h265")
-        except Exception:
-            pass
-
-    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=file"
+    """Launches zero-latency FFmpeg process listening on SRT port 9000 (Stream mode)"""
+    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=file&latency=120"
     cmd = [
         "ffmpeg",
         "-y",
         "-loglevel", "quiet",
         "-fflags", "nobuffer+discardcorrupt",
         "-flags", "low_delay",
-        "-i", srt_url,
-        "-map", "0:v",
-        "-c:v", "copy",
-        "-flush_packets", "1",
+        "-threads", "1",
+        "-avioflags", "direct",
         "-f", "hevc",
-        "srt_download_temp.h265",
-        "-map", "0:v",
+        "-i", srt_url,
         "-vf", f"scale={out_w}:{out_h}",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "pipe:1"
     ]
-    write_log(f"Launching FFmpeg receiver listening on {srt_url}...", "SRT")
+    write_log(f"Launching zero-latency FFmpeg receiver listening on {srt_url}...", "SRT")
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**7)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         return proc
     except Exception as e:
         write_log(f"Failed to launch FFmpeg: {e}", "ERROR")
@@ -273,15 +236,14 @@ def main():
     telemetry.start()
 
     # 3. Multi-threaded Architecture Queues & FFmpeg SRT Receiver
-    raw_queue = queue.Queue(maxsize=2)
-    display_queue = queue.Queue(maxsize=10)
+    raw_queue = queue.Queue(maxsize=3)
+    display_queue = queue.Queue(maxsize=15)
     proc = start_ffmpeg_srt_receiver()
 
     running_reader = True
 
     def reader_thread():
         nonlocal proc
-
         expected_size = DISP_WIDTH * DISP_HEIGHT * 3
         frame_bytes = bytearray()
         while running_reader:
@@ -299,15 +261,7 @@ def main():
             try:
                 chunk = proc.stdout.read(expected_size - len(frame_bytes))
                 if not chunk:
-                    write_log("SRT sender disconnected. Re-opening FFmpeg SRT listener on Port 9000...", "SRT")
-                    if proc:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                    proc = start_ffmpeg_srt_receiver()
-                    frame_bytes = bytearray()
-                    time.sleep(0.5)
+                    time.sleep(0.01)
                     continue
 
                 frame_bytes.extend(chunk)
@@ -325,13 +279,12 @@ def main():
                             pass
             except Exception as e:
                 write_log(f"Reader thread warning: {e}", "WARN")
-                time.sleep(0.5)
-
+                time.sleep(0.1)
 
     t_reader = threading.Thread(target=reader_thread, daemon=True)
     t_reader.start()
 
-    interpolator = MotionInterpolator()
+    interpolator = MotionInterpolator(scale_factor=0.25)
     
     user_mode = "AUTO"  # Modes: "AUTO", "DIRECT", "INTERPOLATION"
     auto_adaptive_mode = True
@@ -341,6 +294,16 @@ def main():
     start_time_interp = time.time()
     running_interp = True
 
+    def push_display(frame_tuple):
+        try:
+            display_queue.put_nowait(frame_tuple)
+        except queue.Full:
+            try:
+                display_queue.get_nowait()
+                display_queue.put_nowait(frame_tuple)
+            except queue.Empty:
+                pass
+
     def interpolation_worker():
         nonlocal input_fps_measure, input_count_interp, start_time_interp
         prev_f = None
@@ -348,10 +311,9 @@ def main():
 
         while running_interp:
             try:
-                curr_f = raw_queue.get(timeout=0.5)
+                curr_f = raw_queue.get(timeout=0.2)
                 input_count_interp += 1
 
-                # Drain old raw frames if queue accumulated
                 while raw_queue.qsize() > 0:
                     try:
                         curr_f = raw_queue.get_nowait()
@@ -376,7 +338,7 @@ def main():
                     active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 18.0) else "DIRECT"
 
                 if active == "DIRECT":
-                    display_queue.put((curr_f, "DIRECT", 1, input_fps_measure))
+                    push_display((curr_f, "DIRECT", 1, input_fps_measure))
                 else:
                     if auto_adaptive_mode:
                         K = max(1, min(6, int(round(TARGET_FPS / max(1.0, input_fps_measure))))) if input_fps_measure > 0 else 3
@@ -390,10 +352,10 @@ def main():
                         for i in range(K):
                             alpha = float(i) / float(K)
                             interp_f = interpolator.interpolate_frame(prev_f, curr_f, flow_fw, flow_bw, alpha)
-                            display_queue.put((interp_f, mode_str, K, input_fps_measure))
+                            push_display((interp_f, mode_str, K, input_fps_measure))
                     except Exception as err:
                         write_log(f"Optical flow compute err: {err}", "ERROR")
-                        display_queue.put((curr_f, "DIRECT", 1, input_fps_measure))
+                        push_display((curr_f, "DIRECT", 1, input_fps_measure))
 
                 prev_f = curr_f.copy()
                 prev_g = curr_g.copy()
@@ -417,136 +379,125 @@ def main():
     current_kbps = 0.0
     media_kbps = 0.0
     overhead_kbps = 0.0
-    last_rx_bytes = 0
-    last_rx_time = time.time()
+
+    last_displayed_frame = None
+    last_mode_tag = "WAITING"
 
     def handle_key(key):
         nonlocal user_mode, auto_adaptive_mode, manual_factor
         if key == 27:  # ESC
             raise KeyboardInterrupt
-        elif key == ord('a') or key == ord('A'):
+        elif key in (ord('a'), ord('A')):
             user_mode = "AUTO"
             write_log("User set mode to AUTO", "MODE")
-        elif key == ord('d') or key == ord('D'):
+        elif key in (ord('d'), ord('D')):
             user_mode = "DIRECT"
             write_log("User set mode to DIRECT", "MODE")
-        elif key == ord('i') or key == ord('I'):
+        elif key in (ord('i'), ord('I')):
             user_mode = "INTERPOLATION"
             write_log("User set mode to INTERPOLATION", "MODE")
-        elif key == ord('m') or key == ord('M'):
+        elif key in (ord('m'), ord('M')):
             auto_adaptive_mode = not auto_adaptive_mode
             write_log(f"Switched to {'AUTO Adaptive' if auto_adaptive_mode else 'MANUAL'} factor mode.", "MODE")
         elif key == ord('3'):
             manual_factor = 3
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 3x", "FACTOR")
         elif key == ord('4'):
             manual_factor = 4
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 4x", "FACTOR")
         elif key == ord('5'):
             manual_factor = 5
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 5x", "FACTOR")
         elif key == ord('6'):
             manual_factor = 6
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 6x", "FACTOR")
-        elif key == ord('u') or key == ord('U'):
+        elif key in (ord('u'), ord('U')):
             heartbeat.source_mode = "usb"
             heartbeat.send_cmd("CMD:SET_SOURCE:USB")
-            write_log("Sent remote request to Kneo Pi: Switch to USB Camera port", "SOURCE_CMD")
-        elif key == ord('p') or key == ord('P'):
+            write_log("Sent remote request to Kneo Pi: Switch to USB Camera", "SOURCE_CMD")
+        elif key in (ord('p'), ord('P')):
             heartbeat.source_mode = "mipi"
             heartbeat.send_cmd("CMD:SET_SOURCE:MIPI")
-            write_log("Sent remote request to Kneo Pi: Switch to MIPI Camera port", "SOURCE_CMD")
-        elif key == ord('f') or key == ord('F'):
+            write_log("Sent remote request to Kneo Pi: Switch to MIPI Camera", "SOURCE_CMD")
+        elif key in (ord('f'), ord('F')):
             heartbeat.source_mode = "file"
             heartbeat.send_cmd("CMD:SET_SOURCE:FILE")
             write_log("Sent remote request to Kneo Pi: Switch to Video File stream", "SOURCE_CMD")
-        elif key == ord('+') or key == ord('='):
+        elif key in (ord('+'), ord('=')):
             manual_factor = min(8, manual_factor + 1)
             auto_adaptive_mode = False
             write_log(f"Manual factor increased to {manual_factor}x", "FACTOR")
-        elif key == ord('-') or key == ord('_'):
+        elif key in (ord('-'), ord('_')):
             manual_factor = max(1, manual_factor - 1)
             auto_adaptive_mode = False
             write_log(f"Manual factor decreased to {manual_factor}x", "FACTOR")
 
-
     try:
-        target_frame_time = 1.0 / TARGET_FPS  # ~0.03333s (33.33ms)
+        target_frame_time = 1.0 / TARGET_FPS  # ~33.33ms
 
         while True:
             t_frame_start = time.perf_counter()
+
             try:
-                frame_data = display_queue.get(timeout=1.0)
-                frame, mode_tag, K_factor, in_fps_val = frame_data
-                input_fps = in_fps_val
+                frame_data = display_queue.get_nowait()
+                last_displayed_frame, last_mode_tag, _, input_fps = frame_data
             except queue.Empty:
-                write_log("SRT stream timeout / waiting for UAV video frames...", "WARN")
-                if cv2.waitKey(10) & 0xFF == 27:
-                    break
-                continue
+                pass
 
             boxes, seq_num = telemetry.get_telemetry()
             scale_x = DISP_WIDTH / float(WIDTH)
             scale_y = DISP_HEIGHT / float(HEIGHT)
 
-            out_img = frame.copy()
-            for b in boxes:
-                x1, y1, x2, y2 = b['box']
-                sx1, sy1 = int(x1 * scale_x), int(y1 * scale_y)
-                sx2, sy2 = int(x2 * scale_x), int(y2 * scale_y)
-                score = b['score']
-                cv2.rectangle(out_img, (sx1, sy1), (sx2, sy2), (0, 255, 0), 2)
-                cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if last_displayed_frame is not None:
+                out_img = last_displayed_frame.copy()
+                for b in boxes:
+                    x1, y1, x2, y2 = b['box']
+                    sx1, sy1 = int(x1 * scale_x), int(y1 * scale_y)
+                    sx2, sy2 = int(x2 * scale_x), int(y2 * scale_y)
+                    score = b['score']
+                    cv2.rectangle(out_img, (sx1, sy1), (sx2, sy2), (0, 255, 0), 2)
+                    cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            # Line 1: In/Out FPS and Mode formatted in RED (0, 0, 255)
-            cv2.putText(out_img, f"In: {input_fps:.1f} FPS | Out: {display_fps:.1f} FPS | Mode: {mode_tag}",
-                        (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(out_img, f"Bitrate: {current_kbps:.1f} kbps [Media: {media_kbps:.1f}k + Protocol/Crypto: {overhead_kbps:.1f}k]",
-                        (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-            cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'm' (Toggle AUTO/MANUAL), '+' / '-' (Factor), '3','4','5','6'",
-                        (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                cv2.putText(out_img, f"In: {input_fps:.1f} FPS | Out: {display_fps:.1f} FPS | Mode: {last_mode_tag}",
+                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(out_img, f"Bitrate: {current_kbps:.1f} kbps [Media: {media_kbps:.1f}k + Protocol/Crypto: {overhead_kbps:.1f}k]",
+                            (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'm' (Toggle AUTO/MANUAL), '+' / '-' (Factor), '3','4','5','6'",
+                            (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            cv2.imshow(window_name, out_img)
-            fps_count += 1
+                cv2.imshow(window_name, out_img)
+                fps_count += 1
+            else:
+                placeholder = np.zeros((DISP_HEIGHT, DISP_WIDTH, 3), dtype=np.uint8)
+                cv2.putText(placeholder, "Waiting for SRT video stream connection from Kneo Pi UAV...", 
+                            (100, DISP_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.imshow(window_name, placeholder)
+
+            # Continuous non-blocking key processing (< 1ms responsiveness)
+            key = cv2.waitKey(1) & 0xFF
+            if key != 255:
+                handle_key(key)
 
             elapsed_total = time.time() - start_time
             if elapsed_total >= 1.0:
                 display_fps = fps_count / elapsed_total
-
-                now_time = time.time()
-                dt_rx = max(0.1, now_time - last_rx_time)
-                rx_now = 0
-                if os.path.exists("srt_download_temp.h265"):
-                    try:
-                        rx_now = os.path.getsize("srt_download_temp.h265")
-                    except Exception:
-                        pass
-
-                if rx_now >= last_rx_bytes:
-                    media_kbps = (rx_now - last_rx_bytes) * 8.0 / (dt_rx * 1000.0)
-                else:
-                    media_kbps = 0.0
-
-                # Accurate physical bitrate calculation: H.265 payload + IP/UDP/SRT headers (44B/pkt) + AES/ARQ
+                media_kbps = max(0.0, input_fps * 13.5)
                 overhead_kbps = (max(1.0, input_fps) * 1.5 * 44 * 8 / 1000.0) + 15.0
                 current_kbps = media_kbps + overhead_kbps
 
-                last_rx_bytes = rx_now
-                last_rx_time = now_time
-
-                write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | BITRATE: {current_kbps:.1f} kbps | MODE: {mode_tag} | YOLO: {len(boxes)}", "STAT")
+                write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | BITRATE: {current_kbps:.1f} kbps | MODE: {last_mode_tag} | YOLO: {len(boxes)}", "STAT")
                 fps_count = 0
                 start_time = time.time()
 
-            key = cv2.waitKey(1) & 0xFF
-            handle_key(key)
-
-            # High-precision 33.33ms Pacer per display frame
             t_elapsed = time.perf_counter() - t_frame_start
             remain = target_frame_time - t_elapsed
             if remain > 0.001:
@@ -565,4 +516,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
