@@ -67,10 +67,18 @@ class HeartbeatSender(threading.Thread):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         write_log(f"Broadcasting Auto-Discovery Heartbeat on UDP port {self.port} (Source: {self.source_mode})...", "HEARTBEAT")
+        
+        # Targets: Global broadcast, common hotspot/RNDIS subnets (192.168.137.255, 192.168.168.255)
+        targets = ['<broadcast>', '192.168.137.255', '192.168.168.255', '255.255.255.255']
+        
         while self.running:
             try:
                 msg = f"GS_HEARTBEAT|SRC:{self.source_mode.upper()}".encode('utf-8')
-                sock.sendto(msg, ('<broadcast>', self.port))
+                for t in targets:
+                    try:
+                        sock.sendto(msg, (t, self.port))
+                    except Exception:
+                        pass
             except Exception:
                 pass
             time.sleep(1.0)
