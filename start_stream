@@ -29,7 +29,16 @@ echo "  🚀 Kneo Pi (KL730) One-Touch Streaming System"
 echo "  Auto-Discovery & Adaptive SRT Connection"
 echo "=================================================="
 
-# 1. Clean up old zombie processes to free VPU CMA memory & camera nodes
+# 1. Self-Healing Environment Checks (Permissions & Shared Libraries)
+chmod +x "$PROJECT_ROOT/start_stream" "$PROJECT_ROOT/bin/venc1" "$PROJECT_ROOT/kneopi-examples/bin/venc1" 2>/dev/null
+
+if [ ! -f /usr/lib/libvmf.so.2 ] && [ -f /usr/lib/vtcs_root_leipzig/libvmf.so ]; then
+    ln -sf /usr/lib/vtcs_root_leipzig/libvmf.so /usr/lib/libvmf.so.2
+    ln -sf /usr/lib/vtcs_root_leipzig/libutil.so /usr/lib/libutil.so.2 2>/dev/null
+    ldconfig 2>/dev/null
+fi
+
+# 2. Clean up old zombie processes to free VPU CMA memory & camera nodes
 echo "[Launcher] Cleaning up stale encoder and daemon processes..."
 pkill -9 -f uav_daemon.py 2>/dev/null
 pkill -9 -f venc1 2>/dev/null
@@ -37,8 +46,7 @@ pkill -9 -f example_nnm_sensor 2>/dev/null
 pkill -9 -f "ffmpeg.*v4l2" 2>/dev/null
 sleep 0.5
 
-
-# 2. Check/Generate H.264 test video stream if needed
+# 3. Check/Generate H.264 test video stream if needed
 TEST_VIDEO="/tmp/uav_test_720p.h264"
 MP4_SOURCE=""
 
@@ -53,13 +61,15 @@ for candidate in \
 done
 
 if [ ! -f "$TEST_VIDEO" ] || [ ! -s "$TEST_VIDEO" ]; then
+    echo "[Launcher] Preparing H.264 test stream file: $TEST_VIDEO..."
     if [ -n "$MP4_SOURCE" ]; then
-        echo "[Launcher] Preparing H.264 test stream file: $TEST_VIDEO..."
         ffmpeg -y -i "$MP4_SOURCE" -t 60 -vf scale=1280:720 -c:v libx264 -preset ultrafast -bf 0 -g 10 -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1
-        echo "[Launcher] Test video ready."
+    else
+        ffmpeg -y -f lavfi -i testsrc=size=1280x720:rate=10 -t 30 -c:v libx264 -preset ultrafast -g 10 -profile:v baseline -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1
     fi
+    echo "[Launcher] Test video ready."
 fi
 
-# 3. Launch adaptive daemon with CLI arguments
+# 4. Launch adaptive daemon with CLI arguments
 echo "[Launcher] Starting UAV Auto-Discovery Daemon..."
 exec python3 "$DAEMON_SCRIPT" "$@"
