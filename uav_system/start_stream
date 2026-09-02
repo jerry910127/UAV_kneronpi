@@ -117,15 +117,15 @@ fi
 if [ -n "$MP4_SOURCE" ]; then
     SOURCE_HASH=$(echo "$MP4_SOURCE" | md5sum | cut -d' ' -f1)
     if [ ! -f "/tmp/.venc_src_$SOURCE_HASH" ] || [ ! -s "$TEST_VIDEO" ]; then
-        echo "[Launcher] Transcoding selected video to 720p 10fps stream: $(basename "$MP4_SOURCE")..."
-        ffmpeg -y -i "$MP4_SOURCE" -t 120 -vf scale=1280:720 -c:v libx264 -preset ultrafast -bf 0 -g 10 -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
+        echo "[Launcher] Transcoding full-length selected video to 720p 10fps stream: $(basename "$MP4_SOURCE")..."
+        ffmpeg -y -i "$MP4_SOURCE" -vf scale=1280:720 -c:v libx264 -preset ultrafast -bf 0 -g 10 -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
         rm -f /tmp/.venc_src_* 2>/dev/null || true
         touch "/tmp/.venc_src_$SOURCE_HASH"
-        echo "[Launcher] Video ready: $(basename "$MP4_SOURCE")"
+        echo "[Launcher] Full video ready: $(basename "$MP4_SOURCE")"
     fi
 elif [ ! -f "$TEST_VIDEO" ] || [ ! -s "$TEST_VIDEO" ]; then
     echo "[Launcher] Generating synthetic 720p test video: $TEST_VIDEO..."
-    ffmpeg -y -f lavfi -i testsrc=size=1280x720:rate=10 -t 30 -c:v libx264 -preset ultrafast -g 10 -profile:v baseline -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
+    ffmpeg -y -f lavfi -i testsrc=size=1280x720:rate=10 -t 60 -c:v libx264 -preset ultrafast -g 10 -profile:v baseline -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
     echo "[Launcher] Synthetic test video ready."
 fi
 

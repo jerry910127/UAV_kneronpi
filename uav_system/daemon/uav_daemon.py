@@ -31,7 +31,7 @@ BIN_DIR = DEV_BIN_DIR
 TIMEOUT_SEC = 300.0
 IP_FILE = "/tmp/ground_station_ip.txt"
 PERSISTENT_H264 = os.path.join(UAV_ROOT, "daemon", "test_video", "uav_test_720p.h264")
-H264_TEST_FILE = PERSISTENT_H264 if os.path.exists(PERSISTENT_H264) else "/tmp/uav_test_720p.h264"
+H264_TEST_FILE = "/tmp/uav_test_720p.h264" if (os.path.exists("/tmp/uav_test_720p.h264") and os.path.getsize("/tmp/uav_test_720p.h264") > 1000) else PERSISTENT_H264
 
 import cam_probe
 
