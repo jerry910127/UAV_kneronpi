@@ -1,87 +1,41 @@
 # UAV Kneron Pi (KL730) 邊緣分工低頻寬圖傳與 AI 遙測系統
 
-本專案是一個基於 Kneo Pi (KL730) 開發板與地面站電腦（Ground PC）所開發的無人機低頻寬影像傳輸與即時 AI 遙測系統。
-
-系統採用 **邊緣分工架構 (Scheme B)**：
-* **機載端 (Kneo Pi)**：專注於高效能的 **VPU 硬體視訊編碼** 與 **NPU YOLOv5 即時目標偵測**，不進行耗時的插幀。
-* **地面站 (Ground PC)**：透過 SRT 接收低碼率影像流，接收 UDP 遙測數據，並藉由 **DIS 光流法 (Optical Flow) 進行地端即時插幀補償 (10 FPS -> 30 FPS)** 與 HUD 標註疊加，從而在頻寬低於 85 kbps 的極端條件下實現 30 FPS 的流暢觀看體驗。
+本專案是一個基於 **Kneo Pi (KL730)** 開發板與 **地面站電腦（Ground Station PC）** 所開發的高效能無人機低頻寬影像傳輸、AI 目標辨識與即時 30 FPS 插幀遙測系統。
 
 ---
 
-## 📂 專案目錄與部署說明 (Deployment Locations)
+## 🎯 系統核心架構 (Edge-Ground Scheme)
 
-為配合開發板與地面站的運作，本專案已重構為以下結構：
+系統採用 **邊緣分工架構 (Scheme B)**，兼具極低傳輸頻寬與高流暢度體驗：
+* **機載端 (Kneo Pi UAV)**：專注於高效能的 **VPU 硬體 H.265 視訊編碼**（10 FPS）與 **NPU YOLOv5 即時目標偵測**，不浪費機載算力進行插幀。
+* **地面站 (Ground Station PC)**：透過 SRT 接收低碼率影像流，接收 UDP 遙測數據，並藉由 **DIS 高速光流法 (Optical Flow) 進行地端即時插幀補償 (10 FPS $\rightarrow$ 30 FPS)** 與 HUD 標註疊加，在極低頻寬條件下實現 **1.0x 真實速度的 30 FPS 流暢觀看體驗**。
+
+---
+
+## 📂 專案目錄結構 (Project Layout)
+
+專案採用單一標準的 `/work` 根目錄結構：
 
 ```text
-UAV_kneronpi/
-├── README.md                  # 本說明文件（專案總覽與引導）
-├── .gitignore                 # 全域 Git 忽略配置
-├── ground_station/            # 【地面站端】專用目錄 (執行於地端 PC)
-│   ├── ground_station.py      # 地面站 HUD 接收器、光流插幀引擎
-│   ├── requirements.txt       # 地面站依賴套件清單
-│   └── README.md              # 地面站詳細操作手冊
-└── work/                      # 【機載端】專用目錄 (執行於 Kneo Pi 開發板)
-    ├── start_stream           # 一鍵自適應啟動圖傳 Bash 腳本
-    ├── 0717/uav_deploy_pack/  # 系統部署包（含守護進程與架構說明）
-    ├── ai_application/        # 執行於 NPU 上的 AI 應用 (YOLOv5)
-    ├── hardware_control/      # 視訊採集與 VPU 硬體編碼限制模組 (venc1.c)
-    ├── peripherals/           # 邊緣感測器與控制硬體 (C / Python)
-    ├── memory_control/        # 記憶體與 DMA 零拷貝緩衝配置
-    └── test/                  # 常用硬體探測與相機測試工具
-```
-
-> [!IMPORTANT]
-> **開發板部署路徑要求**：
-> **`work/` 目錄下的所有內容，在部署至開發板時必須放置於開發板的 `/work` 目錄下**（即路徑需為 `/work/...`，例如 `/work/start_stream`）。專案內的自適應守護進程、啟動腳本與編譯路徑皆以此目錄進行定位，請勿變動。
-
----
-
-## 📐 系統架構 (End-to-End Architecture)
-
-本系統將繁重的影像插幀及 HUD 渲染工作交由地端處理，以釋放機載端 (UAV) 的 CPU/NPU 運算資源：
-
-```mermaid
-flowchart TB
-    subgraph AIRBORNE["機載端：Kneo Pi (KL730 UAV)"]
-        direction TB
-        
-        subgraph VPU_PIPE["硬體視訊編解碼管線 (VDEC/VENC)"]
-            SRC["視訊源 / 暫存檔<br/>(/tmp/uav_test_720p.h264)"] -->|"720p @ 10 FPS"| VDEC["VPU 硬體解碼器 (VDEC)<br/>(無 B-Frame 裸流)"]
-            VDEC -->|"DMA 零拷貝 YUV420"| VENC["VPU 硬體 H.265 編碼器 (VENC)<br/>(Bitrate Clamped ≤ 85kbps)"]
-            VENC -->|"H.265 NAL Units"| SRT_SND["非同步 SRT 發送模組 (venc1.c)<br/>(SRTO_SNDTIMEO = 10ms)"]
-        end
-        
-        subgraph NPU_PIPE["NPU AI 推理與遙測管線 (example_nnm_sensor)"]
-            NPU["Kneo Pi NPU 加速器<br/>(YOLOv5 物體偵測模組)"] -->|"Bounding Box 數據"| ANNOT["C++ OpenCV 標註與整理<br/>(display_liveview.cpp)"]
-            ANNOT -->|"UDP 打包 (24B/Box)"| UDP_SND["UDP 遙測發送端<br/>(Port 9001)"]
-        end
-    end
-
-    AIRBORNE -->|"SRT 視訊流 (Port 9000)<br/>H.265 720p @ 10 FPS"| NET_SRT["無線傳輸通道<br/>(嚴格 ≤ 300kbps)"]
-    AIRBORNE -->|"UDP AI 數據 (Port 9001)<br/>YOLOv5 座標與信心度"| NET_UDP["無線遙測通道"]
-
-    NET_SRT -->|"srt://0.0.0.0:9000"| GROUND
-    NET_UDP -->|"UDP Socket:9001"| GROUND
-
-    subgraph GROUND["地面站：Ground Station PC"]
-        direction TB
-        
-        subgraph FFMPEG_DEC["FFmpeg 低延遲接收管線"]
-            FFMPEG["FFmpeg 雙輸出接收進程<br/>(-flush_packets 1 -flags low_delay)"] -->|"Pipe:1 rawvideo bgr24"| FRAME_Q["影格佇列 (Queue maxsize=30)"]
-            FFMPEG -->|"Output: srt_download_temp.h265"| BITRATE_MON["實體頻寬監測器<br/>(Payload + 44B Header)"]
-        end
-        
-        subgraph DIS_INTERP["DIS 光流插幀引擎 (MotionInterpolator)"]
-            FRAME_Q -->|"10 FPS 原始影格"| DIS["OpenCV DIS 光流計算<br/>(FLOW_SCALE = 0.25, 320x180)"]
-            DIS -->|"補幀計算 (2x/3x)"| WARP["cv2.remap 雙向運動扭曲與融合"]
-        end
-        
-        subgraph HUD_DISP["HUD 渲染與顯示器"]
-            UDP_RCV["UDP 遙測接收器<br/>(TelemetryReceiver)"] -->|"YOLO Boxes"| HUD["HUD 圖層疊加器<br/>(FPS / Bitrate / Mode / YOLO BBox)"]
-            WARP -->|"插幀後 30 FPS 畫面"| HUD
-            HUD -->|"cv2.imshow"| DISPLAY["即時顯示視窗 (1280x720 @ 30 FPS)"]
-        end
-    end
+/work/
+├── README.md                  # 本說明文件（專案總覽與操作指南）
+├── start_stream               # 【UAV 入口】一鍵自癒式串流啟動腳本
+├── setup_fresh_board.sh       # 【全新板子】環境初始化與自我修復腳本
+├── bin/                       # 【UAV 核心二進位與守護進程】
+│   ├── venc1                  # KL730 VPU 硬體 H.265 編碼與 SRT 切片發送器
+│   ├── uav_daemon.py          # 自適應 UDP 9002 心跳偵測與串流守護程式
+│   └── ground_station.py      # 地面端接收程式
+├── ground_station/            # 【地面站端專區】（執行於地端 Windows/Linux/macOS 電腦）
+│   ├── ground_station.py      # 地面站 HUD 接收器、DIS 光流插幀引擎 (30 FPS)
+│   └── requirements.txt       # 地面站 Python 依賴套件 (opencv, numpy)
+├── uav_system/                # 【UAV 系統整合模組】
+│   ├── daemon/                # 守護程式與自適應管線
+│   ├── config/                # 相機與雙鏡頭參數配置
+│   └── src/                   # 核心源碼庫
+└── kneopi-examples/           # 【Kneo Pi 官方 SDK 源碼與編譯區】
+    ├── hardware_control/venc1/# venc1 C 語言原始碼與 CMakeLists.txt
+    ├── ai_application/        # NPU YOLOv5 模型 (NEF) 與推論範例
+    └── memory_control/        # EDMC 記憶體驅動模組
 ```
 
 ---
