@@ -86,16 +86,25 @@ python ground_station.py
 > 地面站會開始監聽 Port 9000 (SRT 影音) 與 Port 9001 (YOLO UDP)，同時在 UDP Port 9002 廣播心跳封包以喚醒無人機端的守護進程。
 
 #### **步驟 B：啟動機載端 (Airborne UAV)**
-將本專案的 `work` 目錄複製到開發板的 `/work` 路徑下。登入開發板終端機，執行以下一鍵啟動指令：
+登入開發板終端機，執行以下一鍵啟動指令：
 ```bash
 cd /work
-./start_stream
+./start_stream <地面站IP>
 ```
-* **參數選擇**：
-  * `./start_stream --mipi` : 強制由 MIPI CSI 相機介面讀取畫面編碼。
-  * `./start_stream --usb`  : 強制由 USB 外接相機讀取畫面編碼。
-  * `./start_stream --file` : 使用內建的模擬影片檔案進行串流測試。
-  * `./start_stream <地面站IP>` : 手動指定地面站 IP，跳過自動搜索。
+
+* **多元視訊來源與影片切換參數**：
+  * `./start_stream <地面站IP>` : 預設模擬影片串流（720p 10 FPS）。
+  * `./start_stream --traffic <地面站IP>` : **一鍵切換為 Traffic & Building 交通街景高畫質視訊**。
+  * `./start_stream --video <影片名稱或路徑> <地面站IP>` : **自由指定任意影片**，例如：
+    ```bash
+    # 切換為 old_town_cross 影片：
+    /work/start_stream --video old_town_cross.mp4 192.168.137.1
+    # 或指定任意本機 MP4 路徑：
+    /work/start_stream --video /path/to/your_video.mp4 192.168.137.1
+    ```
+  * `./start_stream --usb <地面站IP>`  : 使用 USB 外接相機讀取畫面編碼。
+  * `./start_stream --mipi <地面站IP>` : 使用 MIPI CSI 相機介面讀取畫面編碼。
+  * `./start_stream` : 自動尋找模式（監聽 UDP 9002 心跳自動連線）。
 
 ---
 
