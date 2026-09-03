@@ -8,6 +8,9 @@ CMakeCache.txt
 __pycache__/
 lost+found/
 .DS_Store
+release/
+*.zip
+*.tar.gz
 
 .venv/
 venv/
