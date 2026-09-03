@@ -204,15 +204,16 @@ class UAVDaemon:
 
                 cmd_cam = [
                     "ffmpeg", "-y",
+                    "-fflags", "nobuffer+discardcorrupt",
+                    "-flags", "low_delay",
                     "-f", "v4l2",
                     "-i", cam_dev,
                     "-vf", "scale=1280:720",
-                    "-r", "10",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
                     "-tune", "zerolatency",
                     "-bf", "0",
-                    "-g", "10",
+                    "-g", "30",
                     "-pix_fmt", "yuv420p",
                     "-f", "h264",
                     live_fifo
@@ -228,7 +229,7 @@ class UAVDaemon:
                     "-p", "9000",
                     "-f", "10",
                     "-b", "140000",
-                    "-g", "10"
+                    "-g", "30"
                 ]
 
                 print(f"[Daemon] Executing VPU H.265 Hardware Encoder on Live FIFO Camera: {' '.join(cmd_venc)}")
