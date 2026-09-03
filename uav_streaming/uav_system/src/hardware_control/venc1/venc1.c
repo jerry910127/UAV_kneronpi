@@ -49,11 +49,11 @@
 #define FEEDING_SIZE            (256*1024)
 #define ptEncBuff_SIZE          (1024*1024*8)
 
-/* Adaptive Bitrate (ABR) System Parameters */
-#define ABR_MIN_BITRATE         50000   // 50 kbps min video bitrate floor
+/* Adaptive Bitrate (ABR) System Parameters (Strict < 200 kbps Physical Limit) */
+#define ABR_MIN_BITRATE         40000   // 40 kbps min video bitrate floor
 #define ABR_INIT_BITRATE        100000  // 100 kbps initial video bitrate
-#define ABR_MAX_BITRATE         160000  // 160 kbps max video bitrate ceiling
-#define ABR_OVERHEAD_EST        65000   // 65 kbps estimated physical overhead (SRT/UDP/IP headers + AES + AI Telemetry)
+#define ABR_MAX_BITRATE         130000  // 130 kbps max video bitrate ceiling (130k video + 45k overhead = 175k < 200k)
+#define ABR_OVERHEAD_EST        45000   // 45 kbps estimated physical overhead (SRT/UDP/IP headers + AES + AI Telemetry)
 
 static int g_bTerminate = 0;
 static char* g_szInputPath = "/tmp/uav_test_720p.h264";
@@ -250,9 +250,9 @@ static void process_abr_control(VMF_H26XENC_HANDLE_T* h26xe_handle, unsigned int
         new_bitrate = (unsigned int)(current_bitrate * 0.90);
         if (new_bitrate < ABR_MIN_BITRATE) new_bitrate = ABR_MIN_BITRATE;
     } else if (snd_buf_bytes < 2000 && rtt_ms < 80) {
-        // Clean Network: Step up bitrate to maximize quality towards 300kbps physical target
-        if (est_physical_bps < 285000) {
-            new_bitrate = current_bitrate + 10000;
+        // Clean Network: Step up bitrate to maximize quality towards 175kbps (200kbps physical target)
+        if (est_physical_bps < 175000) {
+            new_bitrate = current_bitrate + 8000;
             if (new_bitrate > ABR_MAX_BITRATE) new_bitrate = ABR_MAX_BITRATE;
         }
     }
@@ -274,7 +274,7 @@ static void process_abr_control(VMF_H26XENC_HANDLE_T* h26xe_handle, unsigned int
         }
     } else if (frame_cnt % 30 == 0) {
         unsigned int est_phys = g_dwBitrate + ABR_OVERHEAD_EST;
-        fprintf(stderr, "[ABR Status] Bitrate: %u bps | RTT: %dms | SndBuf: %dB | Est Total Phys: ~%.1f kbps (Target: 300kbps Limit)\n",
+        fprintf(stderr, "[ABR Status] Bitrate: %u bps | RTT: %dms | SndBuf: %dB | Est Total Phys: ~%.1f kbps (Target: 200kbps Limit)\n",
                 g_dwBitrate, rtt_ms, snd_buf_bytes, est_phys / 1000.0f);
     }
 }
@@ -290,7 +290,7 @@ static void print_usage(const char *name)
                     "  -w <width>      Video width (default: 1920)\n"
                     "  -h <height>     Video height (default: 1080)\n"
                     "  -f <fps>        Frame rate (default: 10)\n"
-                    "  -b <bitrate>    H.265 Bitrate in bps (default: 150000)\n"
+                    "  -b <bitrate>    H.265 Bitrate in bps (default: 100000)\n"
                     "  -g <gop>        GOP size (default: 10)\n"
                     "  -l <0|1>        Live mode (0: File loop, 1: Live FIFO/pipe stream)\n"
                     "  -H              Show help\n", name);

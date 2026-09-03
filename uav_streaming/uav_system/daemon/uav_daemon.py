@@ -228,7 +228,7 @@ class UAVDaemon:
                     "-o", ip,
                     "-p", "9000",
                     "-f", "10",
-                    "-b", "140000",
+                    "-b", "100000",
                     "-g", "30"
                 ]
 
@@ -243,7 +243,7 @@ class UAVDaemon:
                     "-o", ip,
                     "-p", "9000",
                     "-f", "10",
-                    "-b", "140000",
+                    "-b", "100000",
                     "-g", "10"
                 ]
                 print(f"[Daemon] Executing H.264 Video File Stream: {' '.join(cmd_venc)}")
