@@ -375,8 +375,7 @@ def main():
 
     interpolator = MotionInterpolator()
     
-    user_mode = "AUTO"  # Modes: "AUTO", "DIRECT", "INTERPOLATION"
-    auto_adaptive_mode = True
+    user_mode = "DIRECT"  # Default: "DIRECT" (Passthrough), "INTERPOLATION" (Manual Factor)
     manual_factor = 3
     input_fps_measure = 10.0
     input_count_interp = 0
@@ -425,18 +424,12 @@ def main():
                     prev_g = curr_g.copy()
 
                 active = user_mode
-                if user_mode == "AUTO":
-                    active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 22.0) else "DIRECT"
 
                 if active == "DIRECT":
                     push_display((curr_f, "DIRECT", 1, input_fps_measure, False))
                 else:
-                    if auto_adaptive_mode:
-                        K = max(1, min(6, int(round(TARGET_FPS / max(1.0, input_fps_measure))))) if input_fps_measure > 0 else 3
-                        mode_str = f"AUTO({K}x)"
-                    else:
-                        K = max(1, min(8, manual_factor))
-                        mode_str = f"MANUAL({K}x)"
+                    K = max(1, min(8, manual_factor))
+                    mode_str = f"INTERP({K}x)"
 
                     try:
                         flow_fw, flow_bw = interpolator.compute_flow(prev_g, curr_g)
@@ -479,39 +472,29 @@ def main():
     overhead_kbps = 0.0
 
     def handle_key(key):
-        nonlocal user_mode, auto_adaptive_mode, manual_factor
+        nonlocal user_mode, manual_factor
         if key == 27:  # ESC
             raise KeyboardInterrupt
-        elif key == ord('a') or key == ord('A'):
-            user_mode = "AUTO"
-            write_log("User set mode to AUTO", "MODE")
         elif key == ord('d') or key == ord('D'):
             user_mode = "DIRECT"
             write_log("User set mode to DIRECT", "MODE")
         elif key == ord('i') or key == ord('I'):
             user_mode = "INTERPOLATION"
-            write_log("User set mode to INTERPOLATION", "MODE")
-        elif key == ord('m') or key == ord('M'):
-            auto_adaptive_mode = not auto_adaptive_mode
-            write_log(f"Switched to {'AUTO Adaptive' if auto_adaptive_mode else 'MANUAL'} factor mode.", "MODE")
+            write_log(f"User set mode to INTERPOLATION ({manual_factor}x)", "MODE")
         elif key == ord('3'):
             manual_factor = 3
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log("User manually set factor to 3x", "FACTOR")
         elif key == ord('4'):
             manual_factor = 4
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log("User manually set factor to 4x", "FACTOR")
         elif key == ord('5'):
             manual_factor = 5
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log("User manually set factor to 5x", "FACTOR")
         elif key == ord('6'):
             manual_factor = 6
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log("User manually set factor to 6x", "FACTOR")
         elif key == ord('u') or key == ord('U'):
@@ -528,12 +511,10 @@ def main():
             write_log("Sent remote request to Kneo Pi: Switch to Video File stream", "SOURCE_CMD")
         elif key == ord('+') or key == ord('='):
             manual_factor = min(8, manual_factor + 1)
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log(f"Manual factor increased to {manual_factor}x", "FACTOR")
         elif key == ord('-') or key == ord('_'):
             manual_factor = max(1, manual_factor - 1)
-            auto_adaptive_mode = False
             user_mode = "INTERPOLATION"
             write_log(f"Manual factor decreased to {manual_factor}x", "FACTOR")
 
@@ -595,7 +576,7 @@ def main():
                 bw_color = (0, 255, 0) if current_kbps <= 200.0 else (0, 0, 255)
                 cv2.putText(out_img, f"Physical Bandwidth: {current_kbps:.1f} kbps [Target Cap: 200.0 kbps | OS Ground-Truth]",
                             (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, bw_color, 2)
-                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'd' (Direct), 'a' (Auto 3x), '3','4','5','6' (Factors)",
+                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'd' (Direct), 'i' (Interp), '3','4','5','6' (Factors)",
                             (15, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
                 if has_display:

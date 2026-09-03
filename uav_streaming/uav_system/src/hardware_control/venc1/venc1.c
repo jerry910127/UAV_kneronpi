@@ -221,7 +221,7 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
         int err = srt_getlasterror(NULL);
         if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
             fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
-            if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
+            if (err == SRT_ECONNLOST || err == SRT_ENOCONN || err == 5004 || err == 2001) {
                 srt_close(g_srt_sock);
                 g_srt_sock = SRT_INVALID_SOCK;
             }
