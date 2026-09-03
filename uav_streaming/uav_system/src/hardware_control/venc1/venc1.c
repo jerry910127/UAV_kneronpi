@@ -464,7 +464,7 @@ int main(int argc, char* argv[])
                     // In live camera mode (FIFO/pipe), do not rewind or reset frame index.
                     // Wait briefly for new incoming frames from camera pipe.
                     clearerr(pfInput);
-                    usleep(10000);
+                    usleep(2000);
                     continue;
                 } else {
                     // Loop the video stream for file playback
@@ -486,12 +486,11 @@ int main(int argc, char* argv[])
                 dec_frame_idx++;
 
                 /* Frame Dropping / Downsampling:
-                 * Assuming 30fps source file. If target g_dwFps < 30 (e.g. 10fps),
-                 * only encode & send 1 out of every (30 / g_dwFps) decoded frames.
-                 * This maintains 1:1 real-time duration (10s video finishes in 10s).
+                 * Only applied in file playback mode. In live camera mode (g_bLiveMode),
+                 * capture upstream already delivers exact target FPS, so keep stride = 1.
                  */
-                unsigned int stride = (g_dwFps > 0 && g_dwFps < 30) ? (30 / g_dwFps) : 1;
-                if ((dec_frame_idx - 1) % stride != 0) {
+                unsigned int stride = (g_bLiveMode || g_dwFps == 0 || g_dwFps >= 30) ? 1 : (30 / g_dwFps);
+                if (stride > 1 && ((dec_frame_idx - 1) % stride != 0)) {
                     continue;
                 }
                 /* Hardware zero-copy YUV sharing from VDEC output to VENC input */
@@ -533,11 +532,13 @@ int main(int argc, char* argv[])
                     fprintf(stderr, "[Encoder] VMF_H26xEnc_ProcessOneFrame failed: %d\n", enc_ret);
                 }
 
-                gettimeofday(&end_time, NULL);
-                long long elapsed_usec = (end_time.tv_sec - start_time.tv_sec) * 1000000LL + (end_time.tv_usec - start_time.tv_usec);
-                long long frame_period_usec = 1000000LL / g_dwFps;
-                if (elapsed_usec < frame_period_usec) {
-                    usleep(frame_period_usec - elapsed_usec);
+                if (!g_bLiveMode) {
+                    gettimeofday(&end_time, NULL);
+                    long long elapsed_usec = (end_time.tv_sec - start_time.tv_sec) * 1000000LL + (end_time.tv_usec - start_time.tv_usec);
+                    long long frame_period_usec = 1000000LL / g_dwFps;
+                    if (elapsed_usec < frame_period_usec) {
+                        usleep(frame_period_usec - elapsed_usec);
+                    }
                 }
             }
         } else {
