@@ -59,6 +59,9 @@
 │       ├── bin/                   # 編譯二進制庫 (venc1)
 │       ├── daemon/                # 守護進程 (uav_daemon.py, cam_probe.py)
 │       └── src/                   # 硬體 C/C++ 原始碼 (venc1.c)
+├── release/                       # 【即用發布包】一鍵部署壓縮包 (免編譯直接解壓執行)
+│   ├── ground_station_v1.0.zip    # 地端接收站免安裝包 (解壓即用)
+│   └── uav_system_v1.0.tar.gz     # 機載端完整預編譯部署包
 ├── README.md                      # 全專案技術手冊與完整串流 SOP
 └── .gitignore                     # Git 忽略設定
 ```
