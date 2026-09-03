@@ -150,6 +150,13 @@ static void send_srt_headers(VMF_H26XENC_HANDLE_T* h26xe_handle)
         if (tSpsPps.dwPpsSize > 0) {
             srt_send(g_srt_sock, (const char*)pps, tSpsPps.dwPpsSize);
         }
+        
+        // Force immediate IDR intra frame so ground station decodes on first frame
+        VMF_CODEC_OPTION_T force_idr;
+        memset(&force_idr, 0, sizeof(force_idr));
+        force_idr.eOptionFlag = VMF_CODEC_H26XE_FORCE_INTRA;
+        VMF_H26xEnc_SetOptions(h26xe_handle, &force_idr);
+        fprintf(stderr, "[SRT] Forced initial IDR Intra frame for ground station decode!\n");
     } else {
         fprintf(stderr, "[SRT] Failed to get H.265 SPS/PPS/VPS headers!\n");
     }
@@ -457,25 +464,19 @@ int main(int argc, char* argv[])
         gettimeofday(&start_time, NULL);
 
         /* Active Latency Sensing & Dynamic Lag Shrinking */
+        int skip_encode_for_catchup = 0;
         if (g_bLiveMode) {
             int pipe_unread = 0;
             if (ioctl(fileno(pfInput), FIONREAD, &pipe_unread) == 0) {
                 int lag_ms = (int)((long long)pipe_unread * 8000LL / (g_dwBitrate > 0 ? g_dwBitrate : 100000));
                 
-                // If backlog exceeds ~350ms (e.g. 4500 bytes at 100kbps), instantly flush stale backlog to real-time head
-                if (pipe_unread > 4500) {
-                    char flush_buf[4096];
-                    int flushed = 0;
-                    while (pipe_unread > 0) {
-                        int to_read = pipe_unread > (int)sizeof(flush_buf) ? (int)sizeof(flush_buf) : pipe_unread;
-                        int n = fread(flush_buf, 1, to_read, pfInput);
-                        if (n <= 0) break;
-                        flushed += n;
-                        if (ioctl(fileno(pfInput), FIONREAD, &pipe_unread) != 0) break;
+                // If backlog exceeds ~300ms, fast-forward decode without encoding to catch up cleanly
+                if (pipe_unread > 6000 && frame_cnt > 5) {
+                    skip_encode_for_catchup = 1;
+                    if (frame_cnt % 10 == 0) {
+                        fprintf(stderr, "[LATENCY_SYNC] Backlog %d bytes (~%dms lag). Fast catch-up active...\n", 
+                                pipe_unread, lag_ms);
                     }
-                    fprintf(stderr, "[LATENCY_SYNC] Backlog %d bytes (~%dms lag) cleared! Lag collapsed to < 50ms.\n", 
-                            flushed, lag_ms);
-                    ptH26xState->eResult = VMF_DEC_EMPTY;
                 } else if (frame_cnt % 30 == 0 && frame_cnt > 0) {
                     fprintf(stderr, "[LATENCY_SYNC] Pipe Backlog: %d bytes (~%dms lag) | Status: %s\n",
                             pipe_unread, lag_ms, lag_ms < 150 ? "SYNCED" : "CATCHING_UP");
@@ -537,6 +538,11 @@ int main(int argc, char* argv[])
                 output_info.pbyDstPhysBuf = (unsigned char*) MemBroker_GetPhysAddr(ptEncBuff);
                 output_info.dwBufSize = ptEncBuff_SIZE;
                 
+                // If catching up, decode to update VPU reference frames but skip encoding stale frame
+                if (skip_encode_for_catchup) {
+                    continue;
+                }
+
                 /* Process H.265 encoding */
                 unsigned int enc_ret = VMF_H26xEnc_ProcessOneFrame(h26xe_handle);
                 if (enc_ret == 0) {
