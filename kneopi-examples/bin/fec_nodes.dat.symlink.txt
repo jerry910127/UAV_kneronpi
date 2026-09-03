@@ -1,1 +1,0 @@
-Symbolic link to: /mnt/flash/leipzig/fec_nodes.dat

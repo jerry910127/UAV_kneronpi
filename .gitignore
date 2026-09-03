@@ -11,9 +11,13 @@ lost+found/
 
 .venv/
 venv/
-*.pyc
-__pycache__/
-build/
-CMakeFiles/
-lost+found/
 
+# Keep external local work directories untracked (Repo dedicated exclusively to uav_streaming)
+/TOF/
+/config/
+/image/
+/kneopi-examples/
+/logs/
+/morse/
+/scripts/
+/utils/
