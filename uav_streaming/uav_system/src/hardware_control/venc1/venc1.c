@@ -86,8 +86,7 @@ static void init_srt(void)
     int yes = 1;
     int latency = 120;
     int message_api = 0;
-    int transtype = g_bLiveMode ? 0 : 1; // 0: SRTT_LIVE for live camera, 1: SRTT_FILE for file playback
-    int tlpktdrop = 1; // Drop too-late packets in live mode to eliminate latency accumulation
+    int transtype = 1; // SRTT_FILE (Matches Ground Station listener perfectly)
     int conn_timeout = 1000; // 1000 ms
     int snd_timeout = 300; // 300 ms send timeout (allows I-frames to transmit cleanly without drop)
     int snd_buf = 2000000; // 2MB sender buffer
@@ -96,9 +95,6 @@ static void init_srt(void)
     srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
     srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
     srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
-    if (g_bLiveMode) {
-        srt_setsockopt(g_srt_sock, 0, SRTO_TLPKTDROP, &tlpktdrop, sizeof tlpktdrop);
-    }
     srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
     srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
     srt_setsockopt(g_srt_sock, 0, SRTO_SNDBUF, &snd_buf, sizeof snd_buf);
@@ -109,8 +105,7 @@ static void init_srt(void)
     sa.sin_port = htons(g_dwSrtPort);
     sa.sin_addr.s_addr = inet_addr(g_szSrtIp);
     
-    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode, transtype=%s)...\n", 
-            g_szSrtIp, g_dwSrtPort, g_bLiveMode ? "LIVE" : "FILE");
+    fprintf(stderr, "[SRT] Connecting to %s:%d (caller mode)...\n", g_szSrtIp, g_dwSrtPort);
     gettimeofday(&g_last_reconnect_time, NULL);
     if (srt_connect(g_srt_sock, (struct sockaddr*)&sa, sizeof sa) == SRT_ERROR) {
         fprintf(stderr, "[SRT] Connection failed: %s.\n", srt_getlasterror_str());
@@ -180,8 +175,7 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             int yes = 1;
             int latency = 120;
             int message_api = 0;
-            int transtype = g_bLiveMode ? 0 : 1;
-            int tlpktdrop = 1;
+            int transtype = 1;
             int conn_timeout = 1000; // 1000 ms
             int snd_timeout = 300; // 300 ms send timeout
             int snd_buf = 2000000; // 2MB sender buffer
@@ -190,9 +184,6 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             srt_setsockopt(g_srt_sock, 0, SRTO_LATENCY, &latency, sizeof latency);
             srt_setsockopt(g_srt_sock, 0, SRTO_MESSAGEAPI, &message_api, sizeof message_api);
             srt_setsockopt(g_srt_sock, 0, SRTO_TRANSTYPE, &transtype, sizeof transtype);
-            if (g_bLiveMode) {
-                srt_setsockopt(g_srt_sock, 0, SRTO_TLPKTDROP, &tlpktdrop, sizeof tlpktdrop);
-            }
             srt_setsockopt(g_srt_sock, 0, SRTO_CONNTIMEO, &conn_timeout, sizeof conn_timeout);
             srt_setsockopt(g_srt_sock, 0, SRTO_SNDTIMEO, &snd_timeout, sizeof snd_timeout);
             srt_setsockopt(g_srt_sock, 0, SRTO_SNDBUF, &snd_buf, sizeof snd_buf);
