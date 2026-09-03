@@ -564,12 +564,12 @@ def main():
                     cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-                # Authoritative HUD Overlay: Effective Motion FPS vs Screen Refresh
+                # Authoritative HUD Overlay: 電腦端接收到的 FPS 為紅色 (0, 0, 255)
                 flow_badge = f"[FLOW SYNTH ACTIVE: +{synth_fps_measure:.1f} FPS]" if synth_fps_measure > 1.0 else "[DIRECT: 0 SYNTH (DUPLICATED)]"
                 badge_color = (0, 255, 0) if synth_fps_measure > 1.0 else (180, 180, 180)
 
-                cv2.putText(out_img, f"Mode: {last_mode_tag} | Effective: {effective_fps_measure:.1f} FPS (Raw: {raw_fps_measure:.1f} + Synth: {synth_fps_measure:+.1f})",
-                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2)
+                cv2.putText(out_img, f"In: {raw_fps_measure:.1f} FPS | Out: {effective_fps_measure:.1f} FPS | Mode: {last_mode_tag}",
+                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 cv2.putText(out_img, f"Motion Status: {flow_badge} | Screen Refresh: {screen_refresh_fps:.1f} Hz",
                             (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, badge_color, 2)
                 
