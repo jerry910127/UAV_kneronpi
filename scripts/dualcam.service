@@ -1,0 +1,13 @@
+[Unit]
+Description=DualCam Service
+Before=leipzig-drivers.service
+
+[Service]
+Type=forking
+#ExecStartPre=/bin/sleep 5
+WorkingDirectory=/work/scripts
+ExecStart=/bin/bash /work/scripts/start.sh
+
+[Install]
+WantedBy=multi-user.target
+#graphical.target

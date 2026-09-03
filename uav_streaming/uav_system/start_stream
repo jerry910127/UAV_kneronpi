@@ -1,0 +1,134 @@
+#!/bin/bash
+# =====================================================================
+#   Kneo Pi (KL730) - UAV System Adaptive Streaming Launcher
+#   Directory: /work/uav_system
+#   Usage:
+#     ./start_stream                 # Auto-adaptive IP discovery + auto video source
+#     ./start_stream --usb           # Stream from USB camera (/dev/video*)
+#     ./start_stream --mipi          # Stream from MIPI CSI camera (/dev/video0)
+#     ./start_stream --file          # Stream from H.264 video file
+#     ./start_stream 192.168.137.1   # Manual Ground Station IP override
+# =====================================================================
+
+REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+UAV_ROOT="$(cd "$(dirname "$REAL_PATH")" && pwd)"
+
+DAEMON_SCRIPT=""
+if [ -f "$UAV_ROOT/daemon/uav_daemon.py" ]; then
+    DAEMON_SCRIPT="$UAV_ROOT/daemon/uav_daemon.py"
+elif [ -f "$UAV_ROOT/bin/uav_daemon.py" ]; then
+    DAEMON_SCRIPT="$UAV_ROOT/bin/uav_daemon.py"
+fi
+
+if [ -z "$DAEMON_SCRIPT" ]; then
+    echo "[Error] Could not locate uav_daemon.py under $UAV_ROOT"
+    exit 1
+fi
+
+echo "=================================================="
+echo "  🚀 Kneo Pi (KL730) UAV System Streaming Launcher"
+echo "  Location: $UAV_ROOT"
+echo "=================================================="
+
+# 1. Self-Healing Environment Checks (VPU Shared Libraries & Permissions)
+chmod +x "$UAV_ROOT/start_stream" "$UAV_ROOT/bin/"* 2>/dev/null || true
+
+if [ ! -f /usr/lib/libvmf.so.2 ] && [ -f /usr/lib/vtcs_root_leipzig/libvmf.so ]; then
+    ln -sf /usr/lib/vtcs_root_leipzig/libvmf.so /usr/lib/libvmf.so.2
+    ln -sf /usr/lib/vtcs_root_leipzig/libutil.so /usr/lib/libutil.so.2 2>/dev/null || true
+    ldconfig 2>/dev/null || true
+fi
+
+# 2. Clean up old zombie processes to free VPU CMA memory & camera nodes
+echo "[Launcher] Cleaning up stale encoder and daemon processes..."
+pkill -9 -f uav_daemon.py 2>/dev/null || true
+pkill -9 -f venc1 2>/dev/null || true
+pkill -9 -f example_nnm_sensor 2>/dev/null || true
+pkill -9 -f "ffmpeg.*v4l2" 2>/dev/null || true
+sleep 0.5
+
+# 3. Parse Custom Video or Shortcut Flags
+TARGET_VIDEO=""
+REMAINING_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --traffic)
+            TARGET_VIDEO="Traffic_and_Building"
+            REMAINING_ARGS+=("--file")
+            shift
+            ;;
+        --video)
+            TARGET_VIDEO="$2"
+            REMAINING_ARGS+=("--file")
+            shift 2
+            ;;
+        *)
+            REMAINING_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# 4. Resolve and Prepare H.264 Test Stream Video
+TEST_VIDEO="/tmp/uav_test_720p.h264"
+MP4_SOURCE=""
+
+if [ "$TARGET_VIDEO" == "Traffic_and_Building" ] || [ "$TARGET_VIDEO" == "traffic" ]; then
+    for candidate in \
+        "$UAV_ROOT/daemon/test_video/Traffic_and_Building_1080p_30fps_h265.mp4" \
+        "/work/0717/uav_deploy_pack/test_video/Traffic_and_Building_1080p_30fps_h265.mp4" \
+        "$UAV_ROOT/bin/test_video/Traffic_and_Building_1080p_30fps_h265.mp4"; do
+        if [ -f "$candidate" ]; then
+            MP4_SOURCE="$candidate"
+            break
+        fi
+    done
+elif [ -n "$TARGET_VIDEO" ]; then
+    if [ -f "$TARGET_VIDEO" ]; then
+        MP4_SOURCE="$TARGET_VIDEO"
+    else
+        # Try searching under test_video
+        for candidate in \
+            "$UAV_ROOT/daemon/test_video/$TARGET_VIDEO" \
+            "/work/0717/uav_deploy_pack/test_video/$TARGET_VIDEO"; do
+            if [ -f "$candidate" ]; then
+                MP4_SOURCE="$candidate"
+                break
+            fi
+        done
+    fi
+fi
+
+# Fallback default candidate list if no specific video was requested
+if [ -z "$MP4_SOURCE" ]; then
+    for candidate in \
+        "$UAV_ROOT/daemon/test_video/模擬空拍機1080p_h264.mp4" \
+        "$UAV_ROOT/daemon/test_video/Traffic_and_Building_1080p_30fps_h265.mp4" \
+        "$UAV_ROOT/daemon/test_video/old_town_cross.mp4"; do
+        if [ -f "$candidate" ]; then
+            MP4_SOURCE="$candidate"
+            break
+        fi
+    done
+fi
+
+# Transcode to /tmp/uav_test_720p.h264 if video source is specified or test file missing
+if [ -n "$MP4_SOURCE" ]; then
+    SOURCE_HASH=$(echo "$MP4_SOURCE" | md5sum | cut -d' ' -f1)
+    if [ ! -f "/tmp/.venc_src_$SOURCE_HASH" ] || [ ! -s "$TEST_VIDEO" ]; then
+        echo "[Launcher] Transcoding full-length selected video to 720p 10fps stream: $(basename "$MP4_SOURCE")..."
+        ffmpeg -y -i "$MP4_SOURCE" -vf scale=1280:720 -c:v libx264 -preset ultrafast -bf 0 -g 10 -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
+        rm -f /tmp/.venc_src_* 2>/dev/null || true
+        touch "/tmp/.venc_src_$SOURCE_HASH"
+        echo "[Launcher] Full video ready: $(basename "$MP4_SOURCE")"
+    fi
+elif [ ! -f "$TEST_VIDEO" ] || [ ! -s "$TEST_VIDEO" ]; then
+    echo "[Launcher] Generating synthetic 720p test video: $TEST_VIDEO..."
+    ffmpeg -y -f lavfi -i testsrc=size=1280x720:rate=10 -t 60 -c:v libx264 -preset ultrafast -g 10 -profile:v baseline -pix_fmt yuv420p "$TEST_VIDEO" >/dev/null 2>&1 || true
+    echo "[Launcher] Synthetic test video ready."
+fi
+
+# 5. Launch adaptive daemon with remaining CLI arguments
+echo "[Launcher] Starting UAV Stream Daemon with arguments: ${REMAINING_ARGS[*]}..."
+exec python3 "$DAEMON_SCRIPT" "${REMAINING_ARGS[@]}"

@@ -1,0 +1,19 @@
+# Build & temporary artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+*.log
+*.swp
+*.pyc
+__pycache__/
+lost+found/
+.DS_Store
+
+.venv/
+venv/
+*.pyc
+__pycache__/
+build/
+CMakeFiles/
+lost+found/
+

@@ -1,0 +1,1 @@
+Symbolic link to: ../ai_application/nnm/build/bin/rgbir_heatDetect
