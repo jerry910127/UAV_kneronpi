@@ -1,4 +1,0 @@
-cd ./build
-make -j2
-cp -rf "./bin" "../"
-cd ".."
