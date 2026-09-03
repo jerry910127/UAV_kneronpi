@@ -65,9 +65,16 @@ def scan_v4l2_cameras():
             is_yuyv = "YUYV" in fmts_upper
             is_color = any(k in fmts_upper for k in ['YUYV', 'UYVY', 'MJPEG', 'NV12', 'YUV', 'RGB'])
 
-            # Determine interface type (USB vs MIPI CSI)
-            is_mipi = any(k in lower_name for k in ['mipi', 'csi', 'sensor', 'sc132', 'imx', 'ov', 'ar0', 'kneron_sensor']) or dev_name in ['video0', 'video1']
-            is_usb = any(k in lower_name for k in ['usb', 'uvc', 'realsense', 'webcam', 'logitech']) or (not is_mipi and is_color)
+            # Determine interface type by checking sysfs device symlink
+            dev_sys_link = ""
+            try:
+                dev_sys_link = os.path.realpath(os.path.join(node, "device"))
+            except Exception:
+                pass
+
+            is_usb_bus = "usb" in dev_sys_link.lower() or "xhci" in dev_sys_link.lower()
+            is_usb = is_usb_bus or any(k in lower_name for k in ['usb', 'uvc', 'realsense', 'webcam', 'logitech', 'miramar'])
+            is_mipi = (not is_usb) and (any(k in lower_name for k in ['mipi', 'csi', 'sensor', 'sc132', 'imx', 'ov', 'ar0', 'kneron_sensor']) or 'voc' in lower_name)
 
             cam_type = "USB" if is_usb else ("MIPI" if is_mipi else "V4L2")
 

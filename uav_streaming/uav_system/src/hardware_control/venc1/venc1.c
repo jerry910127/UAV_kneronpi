@@ -64,6 +64,7 @@ static unsigned int g_dwHeight = 720;
 static unsigned int g_dwFps = 30;
 static unsigned int g_dwBitrate = ABR_INIT_BITRATE; // Initialized to 140kbps for ABR
 static unsigned int g_dwGop = 10;
+static int g_bLiveMode = 0; // 0: File loop mode, 1: Live camera FIFO stream mode
 
 SRTSOCKET g_srt_sock = SRT_INVALID_SOCK;
 static struct timeval g_last_reconnect_time = {0, 0};
@@ -291,6 +292,7 @@ static void print_usage(const char *name)
                     "  -f <fps>        Frame rate (default: 10)\n"
                     "  -b <bitrate>    H.265 Bitrate in bps (default: 150000)\n"
                     "  -g <gop>        GOP size (default: 10)\n"
+                    "  -l <0|1>        Live mode (0: File loop, 1: Live FIFO/pipe stream)\n"
                     "  -H              Show help\n", name);
 }
 
@@ -312,7 +314,7 @@ int main(int argc, char* argv[])
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
 
-    while ((ch = getopt(argc, argv, "i:o:p:w:h:f:b:g:H")) != -1) {
+    while ((ch = getopt(argc, argv, "i:o:p:w:h:f:b:g:l:H")) != -1) {
         switch(ch) {
         case 'i':
             g_szInputPath = strdup(optarg);
@@ -343,6 +345,9 @@ int main(int argc, char* argv[])
             break;
         case 'g':
             g_dwGop = atoi(optarg);
+            break;
+        case 'l':
+            g_bLiveMode = atoi(optarg);
             break;
         case 'H':
         default:
@@ -392,12 +397,13 @@ int main(int argc, char* argv[])
     codec_initopt.eCodec = VMF_CODEC_ENC_HEVC; // H.265
     codec_initopt.dwEncWidth = g_dwWidth;
     codec_initopt.dwEncHeight = g_dwHeight;
-    codec_initopt.dwImgWidth = g_dwWidth;
-    codec_initopt.dwImgHeight = g_dwHeight;
-    codec_initopt.dwMaxWidth = g_dwWidth;
-    codec_initopt.dwMaxHeight = g_dwHeight;
-    codec_initopt.dwMaxUvWidth = g_dwWidth;
+    codec_initopt.dwSrcWidth = g_dwWidth;
+    codec_initopt.dwSrcHeight = g_dwHeight;
+    codec_initopt.dwSrcStride = ((g_dwWidth + 31) & (~31));
+    codec_initopt.dwSrcChromaStride = ((g_dwWidth + 31) & (~31));
     codec_initopt.dwCropX = codec_initopt.dwCropY = 0;
+    codec_initopt.dwCompressionRatio = 0;
+    codec_initopt.bSubFrameSyncEn = 0;
     
     VMF_H26XENC_CONFIG_T h26xe_config;
     memset(&h26xe_config, 0, sizeof(VMF_H26XENC_CONFIG_T));
@@ -454,13 +460,21 @@ int main(int argc, char* argv[])
             bFirstRead = 0;
             unsigned int dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
             if (dwReadCount == 0) { 
-                // Loop the video stream
-                fprintf(stderr, "[VDEC] Looping input video file...\n");
-                fseek(pfInput, 0, SEEK_SET);
-                dec_frame_idx = 0;
-                dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
-                if (dwReadCount == 0) {
-                    ptH26xState->bEndOfBitstream = 1;
+                if (g_bLiveMode) {
+                    // In live camera mode (FIFO/pipe), do not rewind or reset frame index.
+                    // Wait briefly for new incoming frames from camera pipe.
+                    clearerr(pfInput);
+                    usleep(10000);
+                    continue;
+                } else {
+                    // Loop the video stream for file playback
+                    fprintf(stderr, "[VDEC] Looping input video file...\n");
+                    fseek(pfInput, 0, SEEK_SET);
+                    dec_frame_idx = 0;
+                    dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
+                    if (dwReadCount == 0) {
+                        ptH26xState->bEndOfBitstream = 1;
+                    }
                 }
             }   
             ptH26xState->tStreamBuf.dwSize = dwReadCount;

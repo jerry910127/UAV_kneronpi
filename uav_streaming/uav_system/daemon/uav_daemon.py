@@ -191,12 +191,16 @@ class UAVDaemon:
         # Start venc1 encoder process
         if not self.is_process_running("venc1") or force_restart:
             if use_camera and cam_dev:
-                live_h264 = "/tmp/uav_live_cam.h264"
-                if os.path.exists(live_h264):
+                live_fifo = "/tmp/uav_cam.fifo"
+                if os.path.exists(live_fifo):
                     try:
-                        os.remove(live_h264)
+                        os.remove(live_fifo)
                     except Exception:
                         pass
+                try:
+                    os.mkfifo(live_fifo)
+                except Exception as e:
+                    print(f"[Daemon Error] mkfifo {live_fifo} failed: {e}")
 
                 cmd_cam = [
                     "ffmpeg", "-y",
@@ -206,23 +210,20 @@ class UAVDaemon:
                     "-r", "10",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
+                    "-tune", "zerolatency",
                     "-bf", "0",
                     "-g", "10",
                     "-pix_fmt", "yuv420p",
-                    live_h264
+                    "-f", "h264",
+                    live_fifo
                 ]
-                print(f"[Daemon Live Cam Capture] Capturing V4L2 camera ({cam_dev}) -> {live_h264}")
+                print(f"[Daemon Live Cam Capture] Capturing V4L2 camera ({cam_dev}) -> FIFO ({live_fifo})")
                 self.proc_cam_capture = subprocess.Popen(cmd_cam, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                # Wait up to 5 seconds for V4L2 live camera capture header to initialize
-                for _ in range(25):
-                    if os.path.exists(live_h264) and os.path.getsize(live_h264) > 1000:
-                        break
-                    time.sleep(0.2)
 
                 cmd_venc = [
                     os.path.join(BIN_DIR, "venc1"),
-                    "-i", live_h264,
+                    "-i", live_fifo,
+                    "-l", "1",
                     "-o", ip,
                     "-p", "9000",
                     "-f", "10",
@@ -230,13 +231,14 @@ class UAVDaemon:
                     "-g", "10"
                 ]
 
-                print(f"[Daemon] Executing VPU H.265 Hardware Encoder on Live Camera: {' '.join(cmd_venc)}")
+                print(f"[Daemon] Executing VPU H.265 Hardware Encoder on Live FIFO Camera: {' '.join(cmd_venc)}")
                 self.proc_venc1 = subprocess.Popen(cmd_venc, cwd=BIN_DIR)
             else:
                 self.ensure_test_video()
                 cmd_venc = [
                     os.path.join(BIN_DIR, "venc1"),
                     "-i", H264_TEST_FILE,
+                    "-l", "0",
                     "-o", ip,
                     "-p", "9000",
                     "-f", "10",
