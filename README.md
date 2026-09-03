@@ -48,26 +48,19 @@
 ## 📁 目錄架構說明
 
 ```text
-uav_streaming/
-├── start_stream                   # 【核心】機載端一鍵串流入口腳本
-├── README.md                      # 本完整說明與 SOP 文件
-├── ground_station/                # 【地端】地面接收站系統 (PC 端執行)
+├── ground_station/                # 【地端】地面接收站系統 (PC 電腦端直接下載執行)
 │   ├── ground_station.py          # 地面站主程式 (直通顯示、光流插幀、紅色 HUD、權威頻寬監測)
-│   └── requirements.txt           # 地面站所需 Python 依賴包 (opencv-python, numpy)
-└── uav_system/                    # 【機載端】UAV 核心子系統 (Kneo Pi 執行)
-    ├── bin/
-    │   ├── venc1                  # 編譯完成之高效能硬體 H.265 編碼核心 (已整合 ABR 與時差消除)
-    │   └── ground_station.py      # 地面站二進制備份檔案
-    ├── daemon/
-    │   ├── uav_daemon.py          # 機載守護進程 (自動偵測、管道串接、相機熱插拔監控)
-    │   ├── cam_probe.py           # V4L2 相機硬體時鐘與匯流排診斷探測器
-    │   └── test_video/            # 內建無人機 H.264 測試視訊庫 (traffic_10fps, old_town)
-    └── src/
-        └── hardware_control/
-            └── venc1/
-                ├── venc1.c        # 硬體編碼核心原始碼 (動態 ABR、FIONREAD 延遲感知、SRT 引擎)
-                ├── CMakeLists.txt # 編譯構建配置
-                └── build/         # 編譯暫存目錄
+│   ├── requirements.txt           # 地面站所需 Python 依賴包 (opencv-python, numpy)
+│   └── README.md                  # 地面站專屬使用說明
+├── uav_streaming/                 # 【機載端】UAV 串流核心系統 (Kneo Pi 開發板端執行)
+│   ├── start_stream               # 【核心】機載端一鍵串流入口腳本
+│   ├── README.md                  # 機載端說明文件
+│   └── uav_system/                # 機載端核心子系統 (venc1 硬體編碼、守護進程、相機探測)
+│       ├── bin/                   # 編譯二進制庫 (venc1)
+│       ├── daemon/                # 守護進程 (uav_daemon.py, cam_probe.py)
+│       └── src/                   # 硬體 C/C++ 原始碼 (venc1.c)
+├── README.md                      # 全專案技術手冊與完整串流 SOP
+└── .gitignore                     # Git 忽略設定
 ```
 
 ---
