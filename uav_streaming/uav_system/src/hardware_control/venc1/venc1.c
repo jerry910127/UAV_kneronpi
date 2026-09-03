@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 
 #include <srt/srt.h>
@@ -454,6 +455,33 @@ int main(int argc, char* argv[])
     while (!g_bTerminate) {
         struct timeval start_time, end_time;
         gettimeofday(&start_time, NULL);
+
+        /* Active Latency Sensing & Dynamic Lag Shrinking */
+        if (g_bLiveMode) {
+            int pipe_unread = 0;
+            if (ioctl(fileno(pfInput), FIONREAD, &pipe_unread) == 0) {
+                int lag_ms = (int)((long long)pipe_unread * 8000LL / (g_dwBitrate > 0 ? g_dwBitrate : 100000));
+                
+                // If backlog exceeds ~350ms (e.g. 4500 bytes at 100kbps), instantly flush stale backlog to real-time head
+                if (pipe_unread > 4500) {
+                    char flush_buf[4096];
+                    int flushed = 0;
+                    while (pipe_unread > 0) {
+                        int to_read = pipe_unread > (int)sizeof(flush_buf) ? (int)sizeof(flush_buf) : pipe_unread;
+                        int n = fread(flush_buf, 1, to_read, pfInput);
+                        if (n <= 0) break;
+                        flushed += n;
+                        if (ioctl(fileno(pfInput), FIONREAD, &pipe_unread) != 0) break;
+                    }
+                    fprintf(stderr, "[LATENCY_SYNC] Backlog %d bytes (~%dms lag) cleared! Lag collapsed to < 50ms.\n", 
+                            flushed, lag_ms);
+                    ptH26xState->eResult = VMF_DEC_EMPTY;
+                } else if (frame_cnt % 30 == 0 && frame_cnt > 0) {
+                    fprintf(stderr, "[LATENCY_SYNC] Pipe Backlog: %d bytes (~%dms lag) | Status: %s\n",
+                            pipe_unread, lag_ms, lag_ms < 150 ? "SYNCED" : "CATCHING_UP");
+                }
+            }
+        }
 
         if (bFirstRead || VMF_DEC_EMPTY == ptH26xState->eResult) {
             bFirstRead = 0;

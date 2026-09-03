@@ -314,9 +314,9 @@ def main():
     telemetry.start()
     bw_monitor = PhysicalBandwidthMonitor()
 
-    # 3. Multi-threaded Architecture Queues & FFmpeg SRT Receiver
-    raw_queue = queue.Queue(maxsize=3)
-    display_queue = queue.Queue(maxsize=15)
+    # 3. Multi-threaded Architecture Queues & FFmpeg SRT Receiver (Zero-Lag Ultra Low Queue)
+    raw_queue = queue.Queue(maxsize=1)
+    display_queue = queue.Queue(maxsize=3)
     proc = start_ffmpeg_srt_receiver()
 
     running_reader = True
