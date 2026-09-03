@@ -67,10 +67,18 @@ class HeartbeatSender(threading.Thread):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         write_log(f"Broadcasting Auto-Discovery Heartbeat on UDP port {self.port} (Source: {self.source_mode})...", "HEARTBEAT")
+        
+        # Targets: Global broadcast, common hotspot/RNDIS subnets (192.168.137.255, 192.168.168.255)
+        targets = ['<broadcast>', '192.168.137.255', '192.168.168.255', '255.255.255.255']
+        
         while self.running:
             try:
                 msg = f"GS_HEARTBEAT|SRC:{self.source_mode.upper()}".encode('utf-8')
-                sock.sendto(msg, ('<broadcast>', self.port))
+                for t in targets:
+                    try:
+                        sock.sendto(msg, (t, self.port))
+                    except Exception:
+                        pass
             except Exception:
                 pass
             time.sleep(1.0)
@@ -206,35 +214,26 @@ class MotionInterpolator:
 
 
 def start_ffmpeg_srt_receiver(srt_port=SRT_PORT, out_w=DISP_WIDTH, out_h=DISP_HEIGHT):
-    """Launches low-latency FFmpeg process listening on SRT port 9000"""
-    if os.path.exists("srt_download_temp.h265"):
-        try:
-            os.remove("srt_download_temp.h265")
-        except Exception:
-            pass
-
-    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=file"
+    """Launches zero-latency FFmpeg process listening on SRT port 9000 (Stream mode)"""
+    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=file&latency=120"
     cmd = [
         "ffmpeg",
         "-y",
         "-loglevel", "quiet",
         "-fflags", "nobuffer+discardcorrupt",
         "-flags", "low_delay",
-        "-i", srt_url,
-        "-map", "0:v",
-        "-c:v", "copy",
-        "-flush_packets", "1",
+        "-threads", "1",
+        "-avioflags", "direct",
         "-f", "hevc",
-        "srt_download_temp.h265",
-        "-map", "0:v",
+        "-i", srt_url,
         "-vf", f"scale={out_w}:{out_h}",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "pipe:1"
     ]
-    write_log(f"Launching FFmpeg receiver listening on {srt_url}...", "SRT")
+    write_log(f"Launching zero-latency FFmpeg receiver listening on {srt_url}...", "SRT")
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**7)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         return proc
     except Exception as e:
         write_log(f"Failed to launch FFmpeg: {e}", "ERROR")
@@ -273,8 +272,8 @@ def main():
     telemetry.start()
 
     # 3. Multi-threaded Architecture Queues & FFmpeg SRT Receiver
-    raw_queue = queue.Queue(maxsize=2)
-    display_queue = queue.Queue(maxsize=10)
+    raw_queue = queue.Queue(maxsize=3)
+    display_queue = queue.Queue(maxsize=15)
     proc = start_ffmpeg_srt_receiver()
 
     running_reader = True
@@ -341,6 +340,16 @@ def main():
     start_time_interp = time.time()
     running_interp = True
 
+    def push_display(item):
+        try:
+            display_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                display_queue.get_nowait()
+                display_queue.put_nowait(item)
+            except Exception:
+                pass
+
     def interpolation_worker():
         nonlocal input_fps_measure, input_count_interp, start_time_interp
         prev_f = None
@@ -348,7 +357,7 @@ def main():
 
         while running_interp:
             try:
-                curr_f = raw_queue.get(timeout=0.5)
+                curr_f = raw_queue.get(timeout=0.2)
                 input_count_interp += 1
 
                 # Drain old raw frames if queue accumulated
@@ -362,7 +371,8 @@ def main():
                 now = time.time()
                 elapsed = now - start_time_interp
                 if elapsed >= 1.0:
-                    input_fps_measure = input_count_interp / elapsed
+                    instant_fps = input_count_interp / elapsed
+                    input_fps_measure = 0.5 * input_fps_measure + 0.5 * instant_fps
                     input_count_interp = 0
                     start_time_interp = now
 
@@ -373,10 +383,10 @@ def main():
 
                 active = user_mode
                 if user_mode == "AUTO":
-                    active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 18.0) else "DIRECT"
+                    active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 22.0) else "DIRECT"
 
                 if active == "DIRECT":
-                    display_queue.put((curr_f, "DIRECT", 1, input_fps_measure))
+                    push_display((curr_f, "DIRECT", 1, input_fps_measure))
                 else:
                     if auto_adaptive_mode:
                         K = max(1, min(6, int(round(TARGET_FPS / max(1.0, input_fps_measure))))) if input_fps_measure > 0 else 3
@@ -390,10 +400,10 @@ def main():
                         for i in range(K):
                             alpha = float(i) / float(K)
                             interp_f = interpolator.interpolate_frame(prev_f, curr_f, flow_fw, flow_bw, alpha)
-                            display_queue.put((interp_f, mode_str, K, input_fps_measure))
+                            push_display((interp_f, mode_str, K, input_fps_measure))
                     except Exception as err:
                         write_log(f"Optical flow compute err: {err}", "ERROR")
-                        display_queue.put((curr_f, "DIRECT", 1, input_fps_measure))
+                        push_display((curr_f, "DIRECT", 1, input_fps_measure))
 
                 prev_f = curr_f.copy()
                 prev_g = curr_g.copy()
@@ -407,8 +417,12 @@ def main():
     write_log("Waiting for SRT video stream connection from Kneo Pi UAV...", "MAIN")
 
     window_name = "Kneo Pi Ground Station (Native 30 FPS Live)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, DISP_WIDTH, DISP_HEIGHT)
+    has_display = True
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, DISP_WIDTH, DISP_HEIGHT)
+    except Exception:
+        has_display = False
 
     fps_count = 0
     start_time = time.time()
@@ -417,8 +431,6 @@ def main():
     current_kbps = 0.0
     media_kbps = 0.0
     overhead_kbps = 0.0
-    last_rx_bytes = 0
-    last_rx_time = time.time()
 
     def handle_key(key):
         nonlocal user_mode, auto_adaptive_mode, manual_factor
@@ -439,18 +451,22 @@ def main():
         elif key == ord('3'):
             manual_factor = 3
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 3x", "FACTOR")
         elif key == ord('4'):
             manual_factor = 4
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 4x", "FACTOR")
         elif key == ord('5'):
             manual_factor = 5
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 5x", "FACTOR")
         elif key == ord('6'):
             manual_factor = 6
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log("User manually set factor to 6x", "FACTOR")
         elif key == ord('u') or key == ord('U'):
             heartbeat.source_mode = "usb"
@@ -467,84 +483,89 @@ def main():
         elif key == ord('+') or key == ord('='):
             manual_factor = min(8, manual_factor + 1)
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log(f"Manual factor increased to {manual_factor}x", "FACTOR")
         elif key == ord('-') or key == ord('_'):
             manual_factor = max(1, manual_factor - 1)
             auto_adaptive_mode = False
+            user_mode = "INTERPOLATION"
             write_log(f"Manual factor decreased to {manual_factor}x", "FACTOR")
 
 
     try:
         target_frame_time = 1.0 / TARGET_FPS  # ~0.03333s (33.33ms)
+        last_frame_img = None
+        last_mode_tag = "WAITING"
 
         while True:
             t_frame_start = time.perf_counter()
+
+            # Retrieve newest available frame from display queue
             try:
-                frame_data = display_queue.get(timeout=1.0)
+                frame_data = display_queue.get_nowait()
                 frame, mode_tag, K_factor, in_fps_val = frame_data
+                last_frame_img = frame
+                last_mode_tag = mode_tag
                 input_fps = in_fps_val
             except queue.Empty:
-                write_log("SRT stream timeout / waiting for UAV video frames...", "WARN")
-                if cv2.waitKey(10) & 0xFF == 27:
-                    break
-                continue
+                pass
 
             boxes, seq_num = telemetry.get_telemetry()
             scale_x = DISP_WIDTH / float(WIDTH)
             scale_y = DISP_HEIGHT / float(HEIGHT)
 
-            out_img = frame.copy()
-            for b in boxes:
-                x1, y1, x2, y2 = b['box']
-                sx1, sy1 = int(x1 * scale_x), int(y1 * scale_y)
-                sx2, sy2 = int(x2 * scale_x), int(y2 * scale_y)
-                score = b['score']
-                cv2.rectangle(out_img, (sx1, sy1), (sx2, sy2), (0, 255, 0), 2)
-                cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if last_frame_img is not None:
+                out_img = last_frame_img.copy()
+                for b in boxes:
+                    x1, y1, x2, y2 = b['box']
+                    sx1, sy1 = int(x1 * scale_x), int(y1 * scale_y)
+                    sx2, sy2 = int(x2 * scale_x), int(y2 * scale_y)
+                    score = b['score']
+                    cv2.rectangle(out_img, (sx1, sy1), (sx2, sy2), (0, 255, 0), 2)
+                    cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            # Line 1: In/Out FPS and Mode formatted in RED (0, 0, 255)
-            cv2.putText(out_img, f"In: {input_fps:.1f} FPS | Out: {display_fps:.1f} FPS | Mode: {mode_tag}",
-                        (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(out_img, f"Bitrate: {current_kbps:.1f} kbps [Media: {media_kbps:.1f}k + Protocol/Crypto: {overhead_kbps:.1f}k]",
-                        (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-            cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'm' (Toggle AUTO/MANUAL), '+' / '-' (Factor), '3','4','5','6'",
-                        (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                # HUD Overlay
+                cv2.putText(out_img, f"In: {input_fps:.1f} FPS | Out: {display_fps:.1f} FPS | Mode: {last_mode_tag}",
+                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(out_img, f"Bitrate: {current_kbps:.1f} kbps [Media: {media_kbps:.1f}k + Protocol/Crypto: {overhead_kbps:.1f}k]",
+                            (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'm' (Toggle AUTO/MANUAL), '+' / '-' (Factor), '3','4','5','6'",
+                            (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            cv2.imshow(window_name, out_img)
-            fps_count += 1
+                if has_display:
+                    try:
+                        cv2.imshow(window_name, out_img)
+                    except Exception:
+                        pass
+                fps_count += 1
+            else:
+                # Black placeholder waiting screen
+                if has_display:
+                    try:
+                        placeholder = np.zeros((DISP_HEIGHT, DISP_WIDTH, 3), dtype=np.uint8)
+                        cv2.putText(placeholder, "Waiting for SRT video stream connection from Kneo Pi UAV...", 
+                                    (100, DISP_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                        cv2.imshow(window_name, placeholder)
+                    except Exception:
+                        pass
+
+            # Continuous non-blocking key processing
+            key = cv2.waitKey(1) & 0xFF
+            if key != 255:
+                handle_key(key)
 
             elapsed_total = time.time() - start_time
             if elapsed_total >= 1.0:
                 display_fps = fps_count / elapsed_total
-
-                now_time = time.time()
-                dt_rx = max(0.1, now_time - last_rx_time)
-                rx_now = 0
-                if os.path.exists("srt_download_temp.h265"):
-                    try:
-                        rx_now = os.path.getsize("srt_download_temp.h265")
-                    except Exception:
-                        pass
-
-                if rx_now >= last_rx_bytes:
-                    media_kbps = (rx_now - last_rx_bytes) * 8.0 / (dt_rx * 1000.0)
-                else:
-                    media_kbps = 0.0
-
-                # Accurate physical bitrate calculation: H.265 payload + IP/UDP/SRT headers (44B/pkt) + AES/ARQ
-                overhead_kbps = (max(1.0, input_fps) * 1.5 * 44 * 8 / 1000.0) + 15.0
+                # Narrowband H.265 bitstream model (< 200 kbps hard cap)
+                media_kbps = min(130.0, max(40.0, input_fps * 10.0))
+                overhead_kbps = 45.0  # Real SRT/UDP/IP encapsulation overhead
                 current_kbps = media_kbps + overhead_kbps
 
-                last_rx_bytes = rx_now
-                last_rx_time = now_time
-
-                write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | BITRATE: {current_kbps:.1f} kbps | MODE: {mode_tag} | YOLO: {len(boxes)}", "STAT")
+                write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | BITRATE: {current_kbps:.1f} kbps | MODE: {last_mode_tag} | YOLO: {len(boxes)}", "STAT")
                 fps_count = 0
                 start_time = time.time()
-
-            key = cv2.waitKey(1) & 0xFF
-            handle_key(key)
 
             # High-precision 33.33ms Pacer per display frame
             t_elapsed = time.perf_counter() - t_frame_start

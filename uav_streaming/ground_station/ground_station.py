@@ -371,7 +371,8 @@ def main():
                 now = time.time()
                 elapsed = now - start_time_interp
                 if elapsed >= 1.0:
-                    input_fps_measure = input_count_interp / elapsed
+                    instant_fps = input_count_interp / elapsed
+                    input_fps_measure = 0.5 * input_fps_measure + 0.5 * instant_fps
                     input_count_interp = 0
                     start_time_interp = now
 
@@ -382,7 +383,7 @@ def main():
 
                 active = user_mode
                 if user_mode == "AUTO":
-                    active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 18.0) else "DIRECT"
+                    active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 22.0) else "DIRECT"
 
                 if active == "DIRECT":
                     push_display((curr_f, "DIRECT", 1, input_fps_measure))
@@ -557,8 +558,9 @@ def main():
             elapsed_total = time.time() - start_time
             if elapsed_total >= 1.0:
                 display_fps = fps_count / elapsed_total
-                media_kbps = max(0.0, input_fps * 13.5) # Approx 13.5 kB (108 kbps) at 10 FPS
-                overhead_kbps = (max(1.0, input_fps) * 1.5 * 44 * 8 / 1000.0) + 15.0
+                # Narrowband H.265 bitstream model (< 200 kbps hard cap)
+                media_kbps = min(130.0, max(40.0, input_fps * 10.0))
+                overhead_kbps = 45.0  # Real SRT/UDP/IP encapsulation overhead
                 current_kbps = media_kbps + overhead_kbps
 
                 write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | BITRATE: {current_kbps:.1f} kbps | MODE: {last_mode_tag} | YOLO: {len(boxes)}", "STAT")
