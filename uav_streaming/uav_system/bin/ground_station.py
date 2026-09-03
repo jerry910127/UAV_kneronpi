@@ -316,7 +316,7 @@ def main():
 
     # 3. Multi-threaded Architecture Queues & FFmpeg SRT Receiver (Zero-Lag Ultra Low Queue)
     raw_queue = queue.Queue(maxsize=1)
-    display_queue = queue.Queue(maxsize=3)
+    display_queue = queue.Queue(maxsize=6)
     proc = start_ffmpeg_srt_receiver()
 
     running_reader = True
@@ -429,7 +429,7 @@ def main():
                     active = "INTERPOLATION" if (input_fps_measure > 0 and input_fps_measure <= 22.0) else "DIRECT"
 
                 if active == "DIRECT":
-                    push_display((curr_f, "DIRECT", 1, input_fps_measure))
+                    push_display((curr_f, "DIRECT", 1, input_fps_measure, False))
                 else:
                     if auto_adaptive_mode:
                         K = max(1, min(6, int(round(TARGET_FPS / max(1.0, input_fps_measure))))) if input_fps_measure > 0 else 3
@@ -442,11 +442,14 @@ def main():
                         flow_fw, flow_bw = interpolator.compute_flow(prev_g, curr_g)
                         for i in range(K):
                             alpha = float(i) / float(K)
-                            interp_f = interpolator.interpolate_frame(prev_f, curr_f, flow_fw, flow_bw, alpha)
-                            push_display((interp_f, mode_str, K, input_fps_measure))
+                            if i == 0:
+                                push_display((prev_f, mode_str, K, input_fps_measure, False))
+                            else:
+                                interp_f = interpolator.interpolate_frame(prev_f, curr_f, flow_fw, flow_bw, alpha)
+                                push_display((interp_f, mode_str, K, input_fps_measure, True))
                     except Exception as err:
                         write_log(f"Optical flow compute err: {err}", "ERROR")
-                        push_display((curr_f, "DIRECT", 1, input_fps_measure))
+                        push_display((curr_f, "DIRECT", 1, input_fps_measure, False))
 
                 prev_f = curr_f.copy()
                 prev_g = curr_g.copy()
@@ -540,16 +543,28 @@ def main():
         last_frame_img = None
         last_mode_tag = "WAITING"
 
+        raw_frames_count = 0
+        synth_frames_count = 0
+        screen_refresh_count = 0
+        raw_fps_measure = 0.0
+        synth_fps_measure = 0.0
+        effective_fps_measure = 0.0
+        screen_refresh_fps = 0.0
+
         while True:
             t_frame_start = time.perf_counter()
 
             # Retrieve newest available frame from display queue
             try:
                 frame_data = display_queue.get_nowait()
-                frame, mode_tag, K_factor, in_fps_val = frame_data
+                frame, mode_tag, K_factor, in_fps_val, is_synth = frame_data
                 last_frame_img = frame
                 last_mode_tag = mode_tag
                 input_fps = in_fps_val
+                if is_synth:
+                    synth_frames_count += 1
+                else:
+                    raw_frames_count += 1
             except queue.Empty:
                 pass
 
@@ -568,21 +583,27 @@ def main():
                     cv2.putText(out_img, f"YOLO {score:.2f}", (sx1, max(sy1 - 5, 15)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-                # Authoritative HUD Overlay
+                # Authoritative HUD Overlay: Effective Motion FPS vs Screen Refresh
+                flow_badge = f"[FLOW SYNTH ACTIVE: +{synth_fps_measure:.1f} FPS]" if synth_fps_measure > 1.0 else "[DIRECT: 0 SYNTH (DUPLICATED)]"
+                badge_color = (0, 255, 0) if synth_fps_measure > 1.0 else (180, 180, 180)
+
+                cv2.putText(out_img, f"Mode: {last_mode_tag} | Effective: {effective_fps_measure:.1f} FPS (Raw: {raw_fps_measure:.1f} + Synth: {synth_fps_measure:+.1f})",
+                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2)
+                cv2.putText(out_img, f"Motion Status: {flow_badge} | Screen Refresh: {screen_refresh_fps:.1f} Hz",
+                            (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, badge_color, 2)
+                
                 bw_color = (0, 255, 0) if current_kbps <= 200.0 else (0, 0, 255)
-                cv2.putText(out_img, f"In: {input_fps:.1f} FPS | Out: {display_fps:.1f} FPS | Mode: {last_mode_tag}",
-                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 cv2.putText(out_img, f"Physical Bandwidth: {current_kbps:.1f} kbps [Target Cap: 200.0 kbps | OS Ground-Truth]",
-                            (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, bw_color, 2)
-                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'm' (Toggle AUTO/MANUAL), '+' / '-' (Factor), '3','4','5','6'",
-                            (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                            (15, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, bw_color, 2)
+                cv2.putText(out_img, f"YOLO: {len(boxes)} | Press 'd' (Direct), 'a' (Auto 3x), '3','4','5','6' (Factors)",
+                            (15, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
                 if has_display:
                     try:
                         cv2.imshow(window_name, out_img)
                     except Exception:
                         pass
-                fps_count += 1
+                screen_refresh_count += 1
             else:
                 # Black placeholder waiting screen
                 if has_display:
@@ -601,7 +622,14 @@ def main():
 
             elapsed_total = time.time() - start_time
             if elapsed_total >= 1.0:
-                display_fps = fps_count / elapsed_total
+                screen_refresh_fps = screen_refresh_count / elapsed_total
+                raw_fps_measure = raw_frames_count / elapsed_total
+                synth_fps_measure = synth_frames_count / elapsed_total
+                effective_fps_measure = raw_fps_measure + synth_fps_measure
+
+                raw_frames_count = 0
+                synth_frames_count = 0
+                screen_refresh_count = 0
                 
                 # Authoritative Kernel Ground-Truth Sampling
                 raw_measured = bw_monitor.sample()
@@ -611,8 +639,7 @@ def main():
                     # Model fallback: 100k video + 45k SRT overhead
                     current_kbps = min(175.0, max(80.0, input_fps * 10.0 + 45.0))
 
-                write_log(f"IN_FPS: {input_fps:.2f} | OUT_FPS: {display_fps:.2f} | PHY_BW: {current_kbps:.1f} kbps (CAP: 200k) | MODE: {last_mode_tag} | YOLO: {len(boxes)}", "STAT")
-                fps_count = 0
+                write_log(f"EFFECTIVE_FPS: {effective_fps_measure:.2f} (RAW: {raw_fps_measure:.2f} + SYNTH: {synth_fps_measure:+.2f}) | SCREEN_HZ: {screen_refresh_fps:.2f} | PHY_BW: {current_kbps:.1f} kbps | MODE: {last_mode_tag}", "STAT")
                 start_time = time.time()
 
             # High-precision 33.33ms Pacer per display frame
