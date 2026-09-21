@@ -27,6 +27,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <time.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 
@@ -515,12 +517,52 @@ int main(int argc, char* argv[])
                 dec_frame_idx++;
 
                 /* Frame Dropping / Downsampling:
-                 * Only applied in file playback mode. In live camera mode (g_bLiveMode),
-                 * capture upstream already delivers exact target FPS, so keep stride = 1.
+                 * Strictly paces output stream to target g_dwFps (e.g. 10 FPS)
+                 * regardless of native camera hardware frame rate (30fps USB cam, 60fps, 9Hz thermal, etc.).
+                 * VDEC always decodes so DPB reference frames stay intact and clean.
                  */
-                unsigned int stride = (g_bLiveMode || g_dwFps == 0 || g_dwFps >= 30) ? 1 : (30 / g_dwFps);
-                if (stride > 1 && ((dec_frame_idx - 1) % stride != 0)) {
-                    continue;
+                if (g_dwFps > 0 && g_dwFps < 30) {
+                    if (g_bLiveMode) {
+                        static struct timespec last_live_enc_ts = {0, 0};
+                        struct timespec now_ts;
+                        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+                        if (last_live_enc_ts.tv_sec != 0 || last_live_enc_ts.tv_nsec != 0) {
+                            int64_t elapsed_us = (int64_t)(now_ts.tv_sec - last_live_enc_ts.tv_sec) * 1000000LL +
+                                                  (int64_t)(now_ts.tv_nsec - last_live_enc_ts.tv_nsec) / 1000LL;
+                            int64_t target_interval_us = 1000000LL / (int64_t)g_dwFps; // e.g. 100,000 us for 10fps
+                            // 20ms tolerance to absorb camera sensor and USB transfer micro-jitter
+                            int64_t tolerance_us = target_interval_us / 5;
+
+                            if (elapsed_us + tolerance_us < target_interval_us) {
+                                // Downsample: skip hardware VENC encoding, reference pictures already updated
+                                continue;
+                            }
+
+                            if (elapsed_us >= target_interval_us * 2) {
+                                // Camera had a pause or stall; resync baseline
+                                last_live_enc_ts = now_ts;
+                            } else {
+                                // Advance baseline smoothly
+                                uint64_t new_sec = last_live_enc_ts.tv_sec;
+                                uint64_t new_nsec = last_live_enc_ts.tv_nsec + (target_interval_us * 1000ULL);
+                                if (new_nsec >= 1000000000ULL) {
+                                    new_sec += new_nsec / 1000000000ULL;
+                                    new_nsec %= 1000000000ULL;
+                                }
+                                last_live_enc_ts.tv_sec = new_sec;
+                                last_live_enc_ts.tv_nsec = new_nsec;
+                            }
+                        } else {
+                            last_live_enc_ts = now_ts;
+                        }
+                    } else {
+                        // File playback mode (assumes 30fps source bitstream)
+                        unsigned int stride = 30 / g_dwFps;
+                        if (stride > 1 && ((dec_frame_idx - 1) % stride != 0)) {
+                            continue;
+                        }
+                    }
                 }
                 /* Hardware zero-copy YUV sharing from VDEC output to VENC input */
                 input_info.tFrameBufPhys.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysYAddr;

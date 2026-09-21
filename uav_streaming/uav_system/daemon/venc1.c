@@ -27,6 +27,9 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <time.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 
 #include <srt/srt.h>
@@ -49,11 +52,11 @@
 #define FEEDING_SIZE            (256*1024)
 #define ptEncBuff_SIZE          (1024*1024*8)
 
-/* Adaptive Bitrate (ABR) System Parameters */
-#define ABR_MIN_BITRATE         50000   // 50 kbps min video bitrate floor
+/* Adaptive Bitrate (ABR) System Parameters (Strict < 200 kbps Physical Limit) */
+#define ABR_MIN_BITRATE         40000   // 40 kbps min video bitrate floor
 #define ABR_INIT_BITRATE        100000  // 100 kbps initial video bitrate
-#define ABR_MAX_BITRATE         160000  // 160 kbps max video bitrate ceiling
-#define ABR_OVERHEAD_EST        65000   // 65 kbps estimated physical overhead (SRT/UDP/IP headers + AES + AI Telemetry)
+#define ABR_MAX_BITRATE         130000  // 130 kbps max video bitrate ceiling (130k video + 45k overhead = 175k < 200k)
+#define ABR_OVERHEAD_EST        45000   // 45 kbps estimated physical overhead (SRT/UDP/IP headers + AES + AI Telemetry)
 
 static int g_bTerminate = 0;
 static char* g_szInputPath = "/tmp/uav_test_720p.h264";
@@ -64,6 +67,7 @@ static unsigned int g_dwHeight = 720;
 static unsigned int g_dwFps = 30;
 static unsigned int g_dwBitrate = ABR_INIT_BITRATE; // Initialized to 140kbps for ABR
 static unsigned int g_dwGop = 10;
+static int g_bLiveMode = 0; // 0: File loop mode, 1: Live camera FIFO stream mode
 
 SRTSOCKET g_srt_sock = SRT_INVALID_SOCK;
 static struct timeval g_last_reconnect_time = {0, 0};
@@ -85,7 +89,7 @@ static void init_srt(void)
     int yes = 1;
     int latency = 120;
     int message_api = 0;
-    int transtype = 1; // SRTT_FILE
+    int transtype = 1; // SRTT_FILE (Matches Ground Station listener perfectly)
     int conn_timeout = 1000; // 1000 ms
     int snd_timeout = 300; // 300 ms send timeout (allows I-frames to transmit cleanly without drop)
     int snd_buf = 2000000; // 2MB sender buffer
@@ -148,6 +152,13 @@ static void send_srt_headers(VMF_H26XENC_HANDLE_T* h26xe_handle)
         if (tSpsPps.dwPpsSize > 0) {
             srt_send(g_srt_sock, (const char*)pps, tSpsPps.dwPpsSize);
         }
+        
+        // Force immediate IDR intra frame so ground station decodes on first frame
+        VMF_CODEC_OPTION_T force_idr;
+        memset(&force_idr, 0, sizeof(force_idr));
+        force_idr.eOptionFlag = VMF_CODEC_H26XE_FORCE_INTRA;
+        VMF_H26xEnc_SetOptions(h26xe_handle, &force_idr);
+        fprintf(stderr, "[SRT] Forced initial IDR Intra frame for ground station decode!\n");
     } else {
         fprintf(stderr, "[SRT] Failed to get H.265 SPS/PPS/VPS headers!\n");
     }
@@ -174,7 +185,7 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
             int yes = 1;
             int latency = 120;
             int message_api = 0;
-            int transtype = 1; // SRTT_FILE
+            int transtype = 1;
             int conn_timeout = 1000; // 1000 ms
             int snd_timeout = 300; // 300 ms send timeout
             int snd_buf = 2000000; // 2MB sender buffer
@@ -212,7 +223,7 @@ static void send_srt_data(const void* data, int size, VMF_H26XENC_HANDLE_T* h26x
         int err = srt_getlasterror(NULL);
         if (err != 5002 && err != SRT_ETIMEOUT) { // Ignore would-block (SRT_EASYNCSND=5002) and send timeout (SRT_ETIMEOUT)
             fprintf(stderr, "[SRT] Send failed: %s (error %d)\n", srt_getlasterror_str(), err);
-            if (err == SRT_ECONNLOST || err == SRT_ENOCONN) {
+            if (err == SRT_ECONNLOST || err == SRT_ENOCONN || err == 5004 || err == 2001) {
                 srt_close(g_srt_sock);
                 g_srt_sock = SRT_INVALID_SOCK;
             }
@@ -249,9 +260,9 @@ static void process_abr_control(VMF_H26XENC_HANDLE_T* h26xe_handle, unsigned int
         new_bitrate = (unsigned int)(current_bitrate * 0.90);
         if (new_bitrate < ABR_MIN_BITRATE) new_bitrate = ABR_MIN_BITRATE;
     } else if (snd_buf_bytes < 2000 && rtt_ms < 80) {
-        // Clean Network: Step up bitrate to maximize quality towards 300kbps physical target
-        if (est_physical_bps < 285000) {
-            new_bitrate = current_bitrate + 10000;
+        // Clean Network: Step up bitrate to maximize quality towards 175kbps (200kbps physical target)
+        if (est_physical_bps < 175000) {
+            new_bitrate = current_bitrate + 8000;
             if (new_bitrate > ABR_MAX_BITRATE) new_bitrate = ABR_MAX_BITRATE;
         }
     }
@@ -273,7 +284,7 @@ static void process_abr_control(VMF_H26XENC_HANDLE_T* h26xe_handle, unsigned int
         }
     } else if (frame_cnt % 30 == 0) {
         unsigned int est_phys = g_dwBitrate + ABR_OVERHEAD_EST;
-        fprintf(stderr, "[ABR Status] Bitrate: %u bps | RTT: %dms | SndBuf: %dB | Est Total Phys: ~%.1f kbps (Target: 300kbps Limit)\n",
+        fprintf(stderr, "[ABR Status] Bitrate: %u bps | RTT: %dms | SndBuf: %dB | Est Total Phys: ~%.1f kbps (Target: 200kbps Limit)\n",
                 g_dwBitrate, rtt_ms, snd_buf_bytes, est_phys / 1000.0f);
     }
 }
@@ -289,8 +300,9 @@ static void print_usage(const char *name)
                     "  -w <width>      Video width (default: 1920)\n"
                     "  -h <height>     Video height (default: 1080)\n"
                     "  -f <fps>        Frame rate (default: 10)\n"
-                    "  -b <bitrate>    H.265 Bitrate in bps (default: 150000)\n"
+                    "  -b <bitrate>    H.265 Bitrate in bps (default: 100000)\n"
                     "  -g <gop>        GOP size (default: 10)\n"
+                    "  -l <0|1>        Live mode (0: File loop, 1: Live FIFO/pipe stream)\n"
                     "  -H              Show help\n", name);
 }
 
@@ -312,7 +324,7 @@ int main(int argc, char* argv[])
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
 
-    while ((ch = getopt(argc, argv, "i:o:p:w:h:f:b:g:H")) != -1) {
+    while ((ch = getopt(argc, argv, "i:o:p:w:h:f:b:g:l:H")) != -1) {
         switch(ch) {
         case 'i':
             g_szInputPath = strdup(optarg);
@@ -343,6 +355,9 @@ int main(int argc, char* argv[])
             break;
         case 'g':
             g_dwGop = atoi(optarg);
+            break;
+        case 'l':
+            g_bLiveMode = atoi(optarg);
             break;
         case 'H':
         default:
@@ -392,12 +407,13 @@ int main(int argc, char* argv[])
     codec_initopt.eCodec = VMF_CODEC_ENC_HEVC; // H.265
     codec_initopt.dwEncWidth = g_dwWidth;
     codec_initopt.dwEncHeight = g_dwHeight;
-    codec_initopt.dwImgWidth = g_dwWidth;
-    codec_initopt.dwImgHeight = g_dwHeight;
-    codec_initopt.dwMaxWidth = g_dwWidth;
-    codec_initopt.dwMaxHeight = g_dwHeight;
-    codec_initopt.dwMaxUvWidth = g_dwWidth;
+    codec_initopt.dwSrcWidth = g_dwWidth;
+    codec_initopt.dwSrcHeight = g_dwHeight;
+    codec_initopt.dwSrcStride = ((g_dwWidth + 31) & (~31));
+    codec_initopt.dwSrcChromaStride = ((g_dwWidth + 31) & (~31));
     codec_initopt.dwCropX = codec_initopt.dwCropY = 0;
+    codec_initopt.dwCompressionRatio = 0;
+    codec_initopt.bSubFrameSyncEn = 0;
     
     VMF_H26XENC_CONFIG_T h26xe_config;
     memset(&h26xe_config, 0, sizeof(VMF_H26XENC_CONFIG_T));
@@ -449,18 +465,47 @@ int main(int argc, char* argv[])
         struct timeval start_time, end_time;
         gettimeofday(&start_time, NULL);
 
-        ptH26xState->tStreamBuf.dwSize = 0;            
+        /* Active Latency Sensing & Dynamic Lag Shrinking */
+        int skip_encode_for_catchup = 0;
+        if (g_bLiveMode) {
+            int pipe_unread = 0;
+            if (ioctl(fileno(pfInput), FIONREAD, &pipe_unread) == 0) {
+                int lag_ms = (int)((long long)pipe_unread * 8000LL / (g_dwBitrate > 0 ? g_dwBitrate : 100000));
+                
+                // If backlog exceeds ~300ms, fast-forward decode without encoding to catch up cleanly
+                if (pipe_unread > 6000 && frame_cnt > 5) {
+                    skip_encode_for_catchup = 1;
+                    if (frame_cnt % 10 == 0) {
+                        fprintf(stderr, "[LATENCY_SYNC] Backlog %d bytes (~%dms lag). Fast catch-up active...\n", 
+                                pipe_unread, lag_ms);
+                    }
+                } else if (frame_cnt % 30 == 0 && frame_cnt > 0) {
+                    fprintf(stderr, "[LATENCY_SYNC] Pipe Backlog: %d bytes (~%dms lag) | Status: %s\n",
+                            pipe_unread, lag_ms, lag_ms < 150 ? "SYNCED" : "CATCHING_UP");
+                }
+            }
+        }
+
         if (bFirstRead || VMF_DEC_EMPTY == ptH26xState->eResult) {
             bFirstRead = 0;
-            unsigned int dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
+            unsigned int feeding_sz = g_bLiveMode ? (32 * 1024) : FEEDING_SIZE;
+            unsigned int dwReadCount = fread(pbyInBuf, sizeof(unsigned char), feeding_sz, pfInput);
             if (dwReadCount == 0) { 
-                // Loop the video stream
-                fprintf(stderr, "[VDEC] Looping input video file...\n");
-                fseek(pfInput, 0, SEEK_SET);
-                dec_frame_idx = 0;
-                dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
-                if (dwReadCount == 0) {
-                    ptH26xState->bEndOfBitstream = 1;
+                if (g_bLiveMode) {
+                    // In live camera mode (FIFO/pipe), do not rewind or reset frame index.
+                    // Wait briefly for new incoming frames from camera pipe.
+                    clearerr(pfInput);
+                    usleep(1000);
+                    continue;
+                } else {
+                    // Loop the video stream for file playback
+                    fprintf(stderr, "[VDEC] Looping input video file...\n");
+                    fseek(pfInput, 0, SEEK_SET);
+                    dec_frame_idx = 0;
+                    dwReadCount = fread(pbyInBuf, sizeof(unsigned char), FEEDING_SIZE, pfInput);
+                    if (dwReadCount == 0) {
+                        ptH26xState->bEndOfBitstream = 1;
+                    }
                 }
             }   
             ptH26xState->tStreamBuf.dwSize = dwReadCount;
@@ -472,13 +517,52 @@ int main(int argc, char* argv[])
                 dec_frame_idx++;
 
                 /* Frame Dropping / Downsampling:
-                 * Assuming 30fps source file. If target g_dwFps < 30 (e.g. 10fps),
-                 * only encode & send 1 out of every (30 / g_dwFps) decoded frames.
-                 * This maintains 1:1 real-time duration (10s video finishes in 10s).
+                 * Strictly paces output stream to target g_dwFps (e.g. 10 FPS)
+                 * regardless of native camera hardware frame rate (30fps USB cam, 60fps, 9Hz thermal, etc.).
+                 * VDEC always decodes so DPB reference frames stay intact and clean.
                  */
-                unsigned int stride = (g_dwFps > 0 && g_dwFps < 30) ? (30 / g_dwFps) : 1;
-                if ((dec_frame_idx - 1) % stride != 0) {
-                    continue;
+                if (g_dwFps > 0 && g_dwFps < 30) {
+                    if (g_bLiveMode) {
+                        static struct timespec last_live_enc_ts = {0, 0};
+                        struct timespec now_ts;
+                        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+                        if (last_live_enc_ts.tv_sec != 0 || last_live_enc_ts.tv_nsec != 0) {
+                            int64_t elapsed_us = (int64_t)(now_ts.tv_sec - last_live_enc_ts.tv_sec) * 1000000LL +
+                                                  (int64_t)(now_ts.tv_nsec - last_live_enc_ts.tv_nsec) / 1000LL;
+                            int64_t target_interval_us = 1000000LL / (int64_t)g_dwFps; // e.g. 100,000 us for 10fps
+                            // 20ms tolerance to absorb camera sensor and USB transfer micro-jitter
+                            int64_t tolerance_us = target_interval_us / 5;
+
+                            if (elapsed_us + tolerance_us < target_interval_us) {
+                                // Downsample: skip hardware VENC encoding, reference pictures already updated
+                                continue;
+                            }
+
+                            if (elapsed_us >= target_interval_us * 2) {
+                                // Camera had a pause or stall; resync baseline
+                                last_live_enc_ts = now_ts;
+                            } else {
+                                // Advance baseline smoothly
+                                uint64_t new_sec = last_live_enc_ts.tv_sec;
+                                uint64_t new_nsec = last_live_enc_ts.tv_nsec + (target_interval_us * 1000ULL);
+                                if (new_nsec >= 1000000000ULL) {
+                                    new_sec += new_nsec / 1000000000ULL;
+                                    new_nsec %= 1000000000ULL;
+                                }
+                                last_live_enc_ts.tv_sec = new_sec;
+                                last_live_enc_ts.tv_nsec = new_nsec;
+                            }
+                        } else {
+                            last_live_enc_ts = now_ts;
+                        }
+                    } else {
+                        // File playback mode (assumes 30fps source bitstream)
+                        unsigned int stride = 30 / g_dwFps;
+                        if (stride > 1 && ((dec_frame_idx - 1) % stride != 0)) {
+                            continue;
+                        }
+                    }
                 }
                 /* Hardware zero-copy YUV sharing from VDEC output to VENC input */
                 input_info.tFrameBufPhys.apdwData[0] = (unsigned char*) ptH26xState->tFrameBuf.ulPhysYAddr;
@@ -496,6 +580,11 @@ int main(int argc, char* argv[])
                 output_info.pbyDstPhysBuf = (unsigned char*) MemBroker_GetPhysAddr(ptEncBuff);
                 output_info.dwBufSize = ptEncBuff_SIZE;
                 
+                // If catching up, decode to update VPU reference frames but skip encoding stale frame
+                if (skip_encode_for_catchup) {
+                    continue;
+                }
+
                 /* Process H.265 encoding */
                 unsigned int enc_ret = VMF_H26xEnc_ProcessOneFrame(h26xe_handle);
                 if (enc_ret == 0) {
@@ -519,11 +608,13 @@ int main(int argc, char* argv[])
                     fprintf(stderr, "[Encoder] VMF_H26xEnc_ProcessOneFrame failed: %d\n", enc_ret);
                 }
 
-                gettimeofday(&end_time, NULL);
-                long long elapsed_usec = (end_time.tv_sec - start_time.tv_sec) * 1000000LL + (end_time.tv_usec - start_time.tv_usec);
-                long long frame_period_usec = 1000000LL / g_dwFps;
-                if (elapsed_usec < frame_period_usec) {
-                    usleep(frame_period_usec - elapsed_usec);
+                if (!g_bLiveMode) {
+                    gettimeofday(&end_time, NULL);
+                    long long elapsed_usec = (end_time.tv_sec - start_time.tv_sec) * 1000000LL + (end_time.tv_usec - start_time.tv_usec);
+                    long long frame_period_usec = 1000000LL / g_dwFps;
+                    if (elapsed_usec < frame_period_usec) {
+                        usleep(frame_period_usec - elapsed_usec);
+                    }
                 }
             }
         } else {

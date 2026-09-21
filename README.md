@@ -42,6 +42,8 @@
 | **地面站虛高顯示 481 kbps** | 舊版地面站依賴公式 `IN_FPS * 13.5k` 估算，開播連線瞬間突發幀率誤判頻寬。 | 升級為作業系統底層計數引擎 `PhysicalBandwidthMonitor`，以真實實體網卡位元組計數，數值鎖定在 145~175 kbps。 |
 | **螢幕永遠顯示 30 FPS 無法辨別插幀** | 視窗畫布刷新率（30Hz）與影像本質運動更新率混淆，直通模式只是靜態重複繪製舊幀。 | 導入 `EFFECTIVE_FPS = RAW + SYNTH`，直通模式明確顯示 10.0 FPS，插幀模式顯示 30.0 FPS，並標示光流指示燈。 |
 | **地端接收幀率辨識度** | 舊版 HUD 顏色過於單一，無法一眼辨識網路真實抵達的相機幀數。 | 地面站左上角第一行接收幀率（`In: XX.X FPS`）改為**純鮮紅色 `(0, 0, 255)`** 高亮呈現。 |
+| **30 FPS 相機未降至 10 FPS** | `venc1.c` 在即時相機模式（`g_bLiveMode`）強制 `stride = 1`，原生 30 FPS USB 相機全數送出，地端接收高達 30 FPS。 | 實裝 `CLOCK_MONOTONIC` 單調時脈智慧降採樣閘（100ms 間隔 + 20ms 抖動公差），30 FPS 精準 3 取 1 降為 10 FPS，9Hz 熱像儀則 0 丟幀維持原生流暢。 |
+| **Windows 頻寬估算暴增** | Windows 無 `/proc/net/dev`，落入舊公式 `input_fps * 10.0 + 45.0`，當輸入 30 FPS 時數值暴增至 345 kbps。 | 升級 `PhysicalBandwidthMonitor` 支援 `psutil` 與 Windows 原生 `ctypes` 網卡進流統計，加入 EMA 平滑濾波，並將 Fallback 視訊上限鎖定在 100k。 |
 
 ---
 

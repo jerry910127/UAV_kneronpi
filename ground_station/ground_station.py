@@ -22,6 +22,12 @@ import subprocess
 import numpy as np
 import cv2
 
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 # ==========================================
 # Configuration (Matches Kneo Pi venc1.c & uav_daemon.py)
 # ==========================================
@@ -143,17 +149,44 @@ class TelemetryReceiver(threading.Thread):
 class PhysicalBandwidthMonitor:
     """
     Authoritative Physical Bandwidth Measurement Engine:
-    Directly measures ground-truth network ingress bytes from OS Kernel network counters (/proc/net/dev).
+    Cross-platform measurement of ground-truth network ingress bytes:
+    1. psutil (pernic=True, filtering loopback and virtual adapters)
+    2. Linux OS device counters (/proc/net/dev)
+    3. Windows Native ctypes (iphlpapi.dll GetIfTable) / netstat -e fallback
+    Includes burst smoothing (EMA) and anti-explosion fallback model.
     """
-    def __init__(self):
+    def __init__(self, target_iface=None):
         self.last_time = time.time()
+        self.target_iface = target_iface
         self.last_bytes = self._read_total_rx_bytes()
         self.current_kbps = 0.0
+        self.running = True
 
     def _read_total_rx_bytes(self):
-        total = 0
+        # 1. Primary: psutil (best cross-platform OS driver ground-truth)
+        if HAS_PSUTIL:
+            try:
+                if self.target_iface:
+                    stats = psutil.net_io_counters(pernic=True)
+                    if self.target_iface in stats:
+                        return stats[self.target_iface].bytes_recv
+                else:
+                    stats = psutil.net_io_counters(pernic=True)
+                    total = 0
+                    for name, s in stats.items():
+                        lname = name.lower()
+                        if any(k in lname for k in ('loopback', 'pseudo', 'teredo', 'isatap')):
+                            continue
+                        total += s.bytes_recv
+                    if total > 0:
+                        return total
+            except Exception:
+                pass
+
+        # 2. Linux Kernel network device counters
         if os.path.exists('/proc/net/dev'):
             try:
+                total = 0
                 with open('/proc/net/dev', 'r') as f:
                     for line in f:
                         if ':' in line:
@@ -162,9 +195,49 @@ class PhysicalBandwidthMonitor:
                             if iface != 'lo':
                                 vals = parts[1].split()
                                 total += int(vals[0])
-                return total
+                if total > 0:
+                    return total
             except Exception:
                 pass
+
+        # 3. Windows Native ctypes (Zero external dependency fallback)
+        if sys.platform.startswith('win'):
+            try:
+                import ctypes
+                from ctypes import wintypes
+                iphlpapi = ctypes.windll.iphlpapi
+                buf_size = wintypes.DWORD(0)
+                iphlpapi.GetIfTable(None, ctypes.byref(buf_size), False)
+                if buf_size.value > 0:
+                    buf = ctypes.create_string_buffer(buf_size.value)
+                    if iphlpapi.GetIfTable(buf, ctypes.byref(buf_size), False) == 0:
+                        num_entries = struct.unpack_from('<I', buf.raw, 0)[0]
+                        total_rx = 0
+                        for idx in range(num_entries):
+                            row_offset = 4 + idx * 860
+                            if row_offset + 556 <= len(buf.raw):
+                                if_type = struct.unpack_from('<I', buf.raw, row_offset + 516)[0]
+                                if if_type != 24:  # Skip MIB_IF_TYPE_LOOPBACK (24)
+                                    in_octets = struct.unpack_from('<I', buf.raw, row_offset + 552)[0]
+                                    total_rx += in_octets
+                        if total_rx > 0:
+                            return total_rx
+            except Exception:
+                pass
+
+            # 4. Windows netstat -e CLI fallback
+            try:
+                extra_kwargs = {}
+                if sys.platform.startswith('win'):
+                    extra_kwargs['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
+                out = subprocess.check_output('netstat -e', shell=True, stderr=subprocess.DEVNULL, timeout=1, **extra_kwargs).decode('utf-8', errors='ignore')
+                for line in out.splitlines():
+                    tokens = line.split()
+                    if len(tokens) >= 3 and tokens[1].isdigit() and tokens[2].isdigit():
+                        return int(tokens[1])
+            except Exception:
+                pass
+
         return 0
 
     def sample(self, fallback_kbps=0.0):
@@ -174,7 +247,12 @@ class PhysicalBandwidthMonitor:
             cur_b = self._read_total_rx_bytes()
             if cur_b > 0 and self.last_bytes > 0 and cur_b >= self.last_bytes:
                 db = cur_b - self.last_bytes
-                self.current_kbps = (db * 8.0) / (dt * 1000.0)
+                instant_kbps = (db * 8.0) / (dt * 1000.0)
+                # First-order low-pass exponential filter to smooth UDP 10fps burst spikes
+                if self.current_kbps > 0:
+                    self.current_kbps = 0.7 * self.current_kbps + 0.3 * instant_kbps
+                else:
+                    self.current_kbps = instant_kbps
             else:
                 self.current_kbps = fallback_kbps
             self.last_bytes = cur_b
@@ -617,8 +695,9 @@ def main():
                 if raw_measured > 0:
                     current_kbps = raw_measured
                 else:
-                    # Model fallback: 100k video + 45k SRT overhead
-                    current_kbps = min(175.0, max(80.0, input_fps * 10.0 + 45.0))
+                    # Model fallback: capped video budget (100k target) + 45k SRT overhead
+                    media_kbps = min(100.0, max(10.0, input_fps * 10.0))
+                    current_kbps = media_kbps + 45.0
 
                 write_log(f"EFFECTIVE_FPS: {effective_fps_measure:.2f} (RAW: {raw_fps_measure:.2f} + SYNTH: {synth_fps_measure:+.2f}) | SCREEN_HZ: {screen_refresh_fps:.2f} | PHY_BW: {current_kbps:.1f} kbps | MODE: {last_mode_tag}", "STAT")
                 start_time = time.time()
