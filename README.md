@@ -44,6 +44,7 @@
 | **地端接收幀率辨識度** | 舊版 HUD 顏色過於單一，無法一眼辨識網路真實抵達的相機幀數。 | 地面站左上角第一行接收幀率（`In: XX.X FPS`）改為**純鮮紅色 `(0, 0, 255)`** 高亮呈現。 |
 | **30 FPS 相機未降至 10 FPS** | `venc1.c` 在即時相機模式（`g_bLiveMode`）強制 `stride = 1`，原生 30 FPS USB 相機全數送出，地端接收高達 30 FPS。 | 實裝 `CLOCK_MONOTONIC` 單調時脈智慧降採樣閘（100ms 間隔 + 20ms 抖動公差），30 FPS 精準 3 取 1 降為 10 FPS，9Hz 熱像儀則 0 丟幀維持原生流暢。 |
 | **Windows 頻寬估算暴增** | Windows 無 `/proc/net/dev`，落入舊公式 `input_fps * 10.0 + 45.0`，當輸入 30 FPS 時數值暴增至 345 kbps。 | 升級 `PhysicalBandwidthMonitor` 支援 `psutil` 與 Windows 原生 `ctypes` 網卡進流統計，加入 EMA 平滑濾波，並將 Fallback 視訊上限鎖定在 100k。 |
+| **SRT 斷線重試與解析度優化** | 斷線時每 0.5 秒死循環重啟易造成端口鎖死，且 720p 顯示對地端算力開銷較高。 | 畫面解析度優化為 640x480 (VGA)，SRT 規範為 `transtype=live` 並實裝指數退避重連（0.5s~5.0s）與 Decode Gap 幀間隔診斷日誌。 |
 
 ---
 
