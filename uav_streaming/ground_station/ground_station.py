@@ -35,12 +35,13 @@ SRT_PORT = 9000
 UDP_TELEMETRY_PORT = 9001
 UDP_HEARTBEAT_PORT = 9002
 TARGET_FPS = 30.0
-WIDTH = 1280
-HEIGHT = 720
-DISP_WIDTH = 1280
-DISP_HEIGHT = 720
+DISP_WIDTH = WIDTH = 640    #1280
+DISP_HEIGHT = HEIGHT = 480  #720
 FLOW_SCALE = 0.25   # 0.25 = 320x180 超高速算光流 (< 1.5ms)
 LOG_FILE = "fps_performance.log"
+RECONNECT_BASE_DELAY = 0.5   # SRT reconnect backoff: initial delay (seconds)
+RECONNECT_MAX_DELAY = 5.0    # SRT reconnect backoff: cap so it never stalls indefinitely, but also
+                             # never hammers a dead port in a tight kill/rebind loop
 
 def write_log(msg, level="INFO"):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -335,7 +336,7 @@ class MotionInterpolator:
 
 def start_ffmpeg_srt_receiver(srt_port=SRT_PORT, out_w=DISP_WIDTH, out_h=DISP_HEIGHT):
     """Launches zero-latency FFmpeg process listening on SRT port 9000 (Stream mode)"""
-    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=file&latency=120"
+    srt_url = f"srt://0.0.0.0:{srt_port}?mode=listener&transtype=live&latency=120"
     cmd = [
         "ffmpeg",
         "-y",
@@ -345,6 +346,7 @@ def start_ffmpeg_srt_receiver(srt_port=SRT_PORT, out_w=DISP_WIDTH, out_h=DISP_HE
         "-threads", "1",
         "-avioflags", "direct",
         "-f", "hevc",
+        #"-f", "h264",
         "-i", srt_url,
         "-vf", f"scale={out_w}:{out_h}",
         "-f", "rawvideo",
@@ -404,37 +406,64 @@ def main():
 
         expected_size = DISP_WIDTH * DISP_HEIGHT * 3
         frame_bytes = bytearray()
+        # --- Decode-gap diagnostic state (JDBG: verifies whether ffmpeg delivers frames
+        # evenly-paced or in bursts) ---
+        frame_seq = 0
+        last_frame_ts = None
+        # --- Reconnect backoff state: caps how fast we kill+rebind the SRT listener so a
+        # persistent failure (e.g. sender incompatible, port stuck) can't hammer the OS with
+        # a tight relaunch loop every 0.5s. ---
+        reconnect_attempts = 0
+
+        def backoff_and_relaunch(reason):
+            nonlocal proc, reconnect_attempts, frame_bytes, last_frame_ts
+            reconnect_attempts += 1
+            delay = min(RECONNECT_BASE_DELAY * (2 ** (reconnect_attempts - 1)), RECONNECT_MAX_DELAY)
+            write_log(f"{reason} Re-opening listener on Port 9000... "
+                      f"(attempt #{reconnect_attempts}, backing off {delay:.1f}s)", "SRT")
+            if reconnect_attempts % 10 == 0:
+                write_log(f"SRT has failed to (re)connect for {reconnect_attempts} consecutive "
+                          f"attempts -- this looks like a persistent failure, not a transient drop.", "WARN")
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            proc = start_ffmpeg_srt_receiver()
+            frame_bytes = bytearray()
+            last_frame_ts = None
+            time.sleep(delay)
+
         while running_reader:
             if proc is None or proc.poll() is not None:
-                write_log("FFmpeg SRT receiver listener process exited/disconnected. Re-opening listener on Port 9000...", "SRT")
-                if proc:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                proc = start_ffmpeg_srt_receiver()
-                time.sleep(0.5)
+                backoff_and_relaunch("FFmpeg SRT receiver listener process exited/disconnected.")
                 continue
 
             try:
                 chunk = proc.stdout.read(expected_size - len(frame_bytes))
                 if not chunk:
-                    write_log("SRT sender disconnected. Re-opening FFmpeg SRT listener on Port 9000...", "SRT")
-                    if proc:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                    proc = start_ffmpeg_srt_receiver()
-                    frame_bytes = bytearray()
-                    time.sleep(0.5)
+                    backoff_and_relaunch("SRT sender disconnected.")
                     continue
 
                 frame_bytes.extend(chunk)
                 if len(frame_bytes) == expected_size:
                     img = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((DISP_HEIGHT, DISP_WIDTH, 3))
                     frame_bytes = bytearray()
-                    
+
+                    if reconnect_attempts > 0:
+                        write_log(f"SRT stream recovered after {reconnect_attempts} reconnect attempt(s).", "SRT")
+                        reconnect_attempts = 0
+
+                    # Decode-gap diagnostic: log wall-clock time between consecutive
+                    # fully-assembled frames coming out of ffmpeg, to see whether they
+                    # arrive evenly spaced (~100ms for 10fps) or bunched in bursts.
+                    now_ts = time.time()
+                    frame_seq += 1
+                    if last_frame_ts is not None:
+                        gap_ms = (now_ts - last_frame_ts) * 1000.0
+                        write_log(f"frame#{frame_seq} gap={gap_ms:.1f}ms", "DECODE_GAP")
+                    last_frame_ts = now_ts
+
                     try:
                         raw_queue.put_nowait(img)
                     except queue.Full:
@@ -691,15 +720,19 @@ def main():
                 screen_refresh_count = 0
                 
                 # Authoritative Kernel Ground-Truth Sampling
+                eval_kbps = 0.0 #JDBG
                 raw_measured = bw_monitor.sample()
                 if raw_measured > 0:
                     current_kbps = raw_measured
+                    eval_kbps = input_fps * 10.0 + 45.0
                 else:
                     # Model fallback: capped video budget (100k target) + 45k SRT overhead
                     media_kbps = min(100.0, max(10.0, input_fps * 10.0))
                     current_kbps = media_kbps + 45.0
+                    eval_kbps = current_kbps
 
                 write_log(f"EFFECTIVE_FPS: {effective_fps_measure:.2f} (RAW: {raw_fps_measure:.2f} + SYNTH: {synth_fps_measure:+.2f}) | SCREEN_HZ: {screen_refresh_fps:.2f} | PHY_BW: {current_kbps:.1f} kbps | MODE: {last_mode_tag}", "STAT")
+                write_log(f"in_fps: {input_fps_measure:.1f}, in_cnt: {input_count_interp} | eval_bw: {eval_kbps:.1f} kbps", "JDBG")
                 start_time = time.time()
 
             # High-precision 33.33ms Pacer per display frame
